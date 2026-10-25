@@ -305,6 +305,16 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         new_title = "流量重置日：${d} · 每月${r}日重置（不足该日取月末）"
         if old_title in out:
             out = out.replace(old_title, new_title)
+        # 品牌字标（与 BigCat B 同款）：站名拆为 🐈 + 名称 + 绿框字母徽章
+        old_brand = "{className:`home-brand-title`,title:e,children:e}"
+        new_brand = ("{className:`home-brand-title`,title:e,children:(()=>{"
+                     "const m=/^(.*)\\s+([A-Za-z0-9])$/.exec(e||\"\");"
+                     "if(!m)return e;"
+                     "return[(0,F.jsx)(`span`,{className:`bct-cat`,children:`🐈`}),"
+                     "(0,F.jsx)(`span`,{children:m[1]+\" \"}),"
+                     "(0,F.jsx)(`span`,{className:`bct-badge`,children:m[2]})]})()}")
+        if old_brand in out:
+            out = out.replace(old_brand, new_brand)
         out = out.encode("utf-8")
         _INSTANCE_JS_PATCH_CACHE[key] = out
         return out

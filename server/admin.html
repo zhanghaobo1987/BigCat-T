@@ -14,7 +14,9 @@
   [data-skin-mode="light"] aside nav button.active { background:#d5e4fb; }
   [data-skin-mode="light"] input, [data-skin-mode="light"] select, [data-skin-mode="light"] textarea { background:#f7fafc; }
   .brand { text-decoration:none; color:inherit; display:block; }
-  .brand-icon { width:32px; height:32px; border-radius:8px; vertical-align:-8px; margin-right:8px; }
+  .logo-emoji { font-size:19px; }
+  .logo-title { font-weight:700; white-space:nowrap; }
+  .logo-b { color:#2e8b57; border:2px solid #2e8b57; border-radius:7px; padding:0 7px; margin-left:2px; font-weight:800; }
   .brand h1 { cursor:pointer; }
   .brand:hover h1 { color:var(--accent); }
   .theme-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:16px; }
@@ -208,7 +210,7 @@
 
 <!-- 登录 / 初始化 -->
 <div id="view-auth" class="card center hidden" style="margin:8vh auto;max-width:400px">
-  <h1><img src="/icon.png" alt="" style="width:34px;height:34px;border-radius:9px;vertical-align:-9px;margin-right:8px">BigCat T 后台</h1>
+  <h1><span class="logo-emoji">🐈</span> <span class="logo-title">BigCat <span class="logo-b">T</span></span> 后台</h1>
   <div id="auth-setup">
     <p class="muted">首次使用，请创建管理员账号。</p>
     <label>管理员用户名</label>
@@ -272,7 +274,7 @@
 <!-- 主界面 -->
 <div id="view-main" class="layout hidden">
   <aside>
-    <a class="brand" href="/" target="_blank" rel="noopener" title="在新标签页打开前台监控页"><h1><img src="/icon.png" alt="" class="brand-icon">BigCat T</h1></a>
+    <a class="brand" href="/" target="_blank" rel="noopener" title="在新标签页打开前台监控页"><h1><span class="logo-emoji">🐈</span> <span class="logo-title">BigCat <span class="logo-b">T</span></span></h1></a>
     <p class="ver" id="side-ver"></p>
     <nav id="nav"></nav>
     <div class="nav-foot-col">
