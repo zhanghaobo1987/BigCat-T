@@ -706,16 +706,36 @@
     <section id="page-migrate" class="page hidden">
       <div class="card">
         <h2>🚚 服务器迁移</h2>
-        <p class="muted">将本机 BigCat 的全部数据（数据库、主题、配置）一键迁移到新服务器。迁移过程：连接测试 → 目标机自动安装 BigCat → 打包本地数据 → 传输 → 目标机恢复并启动服务。</p>
-        <div class="form-grid" style="max-width:520px">
+        <p class="muted">输入新服务器的 IP、SSH 端口和用户名（默认 root），选择密码或密钥登录，一键把本机 BigCat 全部内容（程序文件、数据库、主题、配置）原封不动迁移过去。目标服务器会自动安装 BigCat 并配置 systemd 开机自启。密码/密钥仅用于本次迁移，不会被保存。使用非 root 用户时，特权操作会自动通过 sudo -i 以 root 身份执行，该用户需具备免密 sudo 权限（如甲骨文云的 ubuntu）。迁移过程中本机可正常使用。</p>
+        <div class="form-grid" style="max-width:560px">
           <label>新服务器 IP <span class="req">*</span>
             <input id="mig-host" placeholder="例如 1.2.3.4">
           </label>
           <label>SSH 端口
             <input id="mig-port" placeholder="留空默认 22" inputmode="numeric">
           </label>
-          <label>SSH 密码（root） <span class="req">*</span>
-            <input id="mig-pass" type="password" placeholder="目标服务器 root 密码" autocomplete="new-password">
+          <label>SSH 用户名
+            <input id="mig-user" value="root" placeholder="默认 root">
+          </label>
+        </div>
+        <div class="btn-row" style="margin:12px 0 4px">
+          <button class="primary" id="mig-auth-pass" type="button">密码登录</button>
+          <button class="ghost" id="mig-auth-key" type="button">密钥登录</button>
+        </div>
+        <div class="form-grid" style="max-width:560px" id="mig-pass-wrap">
+          <label>SSH 密码 <span class="req">*</span>
+            <input id="mig-pass" type="password" placeholder="仅用于本次迁移，不会被保存" autocomplete="new-password">
+          </label>
+        </div>
+        <div id="mig-key-wrap" class="hidden" style="max-width:560px">
+          <label>SSH 私钥 <span class="req">*</span></label>
+          <textarea id="mig-key" rows="5" placeholder="粘贴私钥内容（-----BEGIN OPENSSH PRIVATE KEY----- …），或选择私钥文件"></textarea>
+          <div class="btn-row" style="margin:6px 0">
+            <label class="ghost" style="cursor:pointer;padding:6px 14px;border-radius:8px">选择私钥文件<input id="mig-key-file" type="file" class="hidden"></label>
+            <span class="muted" id="mig-key-name"></span>
+          </div>
+          <label>密钥口令（无口令可留空）
+            <input id="mig-key-pass" type="password" placeholder="私钥口令" autocomplete="new-password">
           </label>
         </div>
         <div class="btn-row">
@@ -728,6 +748,9 @@
           </div>
           <p id="mig-step" class="muted"></p>
           <div id="mig-log" class="log-box"></div>
+          <div class="btn-row hidden" id="mig-reset-row" style="margin-top:12px">
+            <button class="ghost" id="mig-reset">再次迁移</button>
+          </div>
         </div>
       </div>
     </section>
@@ -2806,12 +2829,44 @@ LOADERS.about = loadAbout;
 
 /* ---------------- 服务器迁移 ---------------- */
 let migPollTimer = null;
+let migAuthType = 'password';
+function migSetAuthType(t) {
+  migAuthType = t;
+  $('mig-pass-wrap').classList.toggle('hidden', t !== 'password');
+  $('mig-key-wrap').classList.toggle('hidden', t !== 'key');
+  $('mig-auth-pass').className = t === 'password' ? 'primary' : 'ghost';
+  $('mig-auth-key').className = t === 'key' ? 'primary' : 'ghost';
+}
+$('mig-auth-pass').onclick = () => migSetAuthType('password');
+$('mig-auth-key').onclick = () => migSetAuthType('key');
+$('mig-key-file').onchange = e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { $('mig-key').value = String(rd.result || ''); $('mig-key-name').textContent = f.name; };
+  rd.readAsText(f);
+};
 function migVals() {
-  return {
+  const v = {
     host: $('mig-host').value.trim(),
     port: $('mig-port').value.trim() || '22',
-    password: $('mig-pass').value,
+    username: $('mig-user').value.trim() || 'root',
+    auth_type: migAuthType,
+    private_key: $('mig-key').value,
+    passphrase: $('mig-key-pass').value,
   };
+  v['password'] = $('mig-pass').value;
+  return v;
+}
+function migValidate(v) {
+  if (!v.host) return '请输入新服务器 IP';
+  if (v.auth_type === 'password' && !v.password) return '请输入 SSH 密码';
+  if (v.auth_type === 'key' && !v.private_key.includes('PRIVATE KEY')) return '请粘贴或上传 SSH 私钥';
+  return '';
+}
+function migClearSecrets() {
+  $('mig-pass').value = ''; $('mig-key').value = ''; $('mig-key-pass').value = '';
+  $('mig-key-name').textContent = ''; $('mig-key-file').value = '';
 }
 function migLogHtml(log) {
   return log.map(e =>
@@ -2819,6 +2874,7 @@ function migLogHtml(log) {
   ).join('');
 }
 function renderMigStatus(s) {
+  if (!s.running && !s.done && !(s.log && s.log.length)) return; // 空闲状态不展开
   $('mig-status').classList.remove('hidden');
   $('mig-bar').style.width = (s.progress || 0) + '%';
   $('mig-step').textContent = s.step || '';
@@ -2827,6 +2883,7 @@ function renderMigStatus(s) {
   const busy = !!s.running;
   $('mig-start').disabled = busy;
   $('mig-test').disabled = busy;
+  $('mig-reset-row').classList.toggle('hidden', !(s.done && !s.running));
   if (s.done && !s.running && migPollTimer) {
     clearInterval(migPollTimer); migPollTimer = null;
   }
@@ -2845,15 +2902,13 @@ async function loadMigrate() {
 }
 $('mig-test').onclick = async () => {
   const v = migVals();
-  if (!v.host) return toast('请输入新服务器 IP');
-  if (!v.password) return toast('请输入 SSH 密码');
+  const bad = migValidate(v);
+  if (bad) return toast(bad);
   $('mig-test').disabled = true;
   try {
-    const {data} = await api('/api/admin/migrate/test', {
-      method: 'POST', body: JSON.stringify(v),
-    });
+    const {data} = await api('/api/admin/migrate/test', 'POST', v);
     if (data.ok) {
-      toast('连接成功' + (data.has_bigcat ? '（目标机已安装 BigCat，将覆盖数据）' : ''));
+      toast('连接成功' + (data.has_bigcat ? '（目标机已安装 BigCat，将覆盖其数据）' : ''));
     } else {
       toast('连接失败：' + data.message);
     }
@@ -2865,22 +2920,36 @@ $('mig-test').onclick = async () => {
 };
 $('mig-start').onclick = async () => {
   const v = migVals();
-  if (!v.host) return toast('请输入新服务器 IP');
-  if (!v.password) return toast('请输入 SSH 密码');
-  if (!confirm(`确认将本机全部数据迁移到 ${v.host}:${v.port} 吗？\n\n目标机上的 BigCat 数据将被覆盖！`)) return;
+  const bad = migValidate(v);
+  if (bad) return toast(bad);
+  const who = `${v.username}@${v.host}:${v.port}（${v.auth_type === 'key' ? '密钥登录' : '密码登录'}）`;
+  if (!confirm(`确定把本机 BigCat 全部内容迁移到 ${who} 吗？\n\n目标机上的 BigCat 数据将被覆盖！整个过程可能需要几分钟，期间本机可正常使用。`)) return;
   if (!confirm('再次确认：迁移后请将域名/探针指向新服务器，本机服务仍需手动停止。开始迁移？')) return;
   try {
-    const {data} = await api('/api/admin/migrate/start', {
-      method: 'POST', body: JSON.stringify(v),
-    });
+    const {data} = await api('/api/admin/migrate/start', 'POST', v);
     if (!data.ok) return toast(data.message);
     toast('迁移已启动');
-    $('mig-pass').value = ''; // 启动后清空密码框
+    migClearSecrets(); // 启动后清空凭据输入框
     if (migPollTimer) clearInterval(migPollTimer);
     migPollTimer = setInterval(pollMigStatus, 2000);
     pollMigStatus();
   } catch (e) {
     toast('启动失败：' + e.message);
+  }
+};
+$('mig-reset').onclick = async () => {
+  try {
+    const {data} = await api('/api/admin/migrate/reset', 'POST', {});
+    if (!data.ok) return toast(data.message || '重置失败');
+    $('mig-host').value = ''; $('mig-port').value = ''; $('mig-user').value = 'root';
+    migClearSecrets();
+    migSetAuthType('password');
+    $('mig-status').classList.add('hidden');
+    $('mig-bar').style.width = '0%';
+    $('mig-step').textContent = '';
+    $('mig-log').innerHTML = '';
+  } catch (e) {
+    toast('重置失败：' + e.message);
   }
 };
 LOADERS.migrate = loadMigrate;

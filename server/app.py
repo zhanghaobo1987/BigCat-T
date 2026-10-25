@@ -29,6 +29,7 @@ JSON-RPC methods implemented:
   common:getNodesLatestStatus
 """
 import functools
+import fnmatch
 import json
 import math
 import os
@@ -37,7 +38,9 @@ import secrets
 import socket
 import base64
 import shutil
+import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import ipaddress
@@ -2143,12 +2146,20 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         return wrapper
 
     # ------------------------------------------------------------ 一键迁移
-    # 将本机 BigCat 所有数据（数据库、主题、配置）迁移到新服务器。
+    # 将本机 BigCat 全部内容一键迁移到新服务器（对齐 BigCat B 迁移规格）：
+    # - 登录方式：密码（sshpass -e，密码走环境变量不进命令行）或 SSH 密钥
+    #   （私钥+可选口令；私钥仅在迁移期间写入 /tmp 临时文件 0600，结束即删）
+    # - 支持自定义 SSH 用户名（默认 root）；非 root 用户的特权操作统一经
+    #   sudo -i 以 root 身份执行（要求目标用户免密 sudo）
+    # - 数据原封不动：数据库先做一致性快照，数据目录（主题/皮肤等）整体
+    #   rsync 镜像，程序文件同步本机版本，最后核对版本号与关键表行数
+    # - 凭据仅保存在进程内存中，不落盘、不记日志
     _MIGRATE_STATE = {
         "running": False, "step": "", "progress": 0, "log": [],
         "done": False, "success": False, "error": "", "target": "",
     }
     _MIGRATE_LOCK = threading.Lock()
+    _MIGRATE_AUTH = {}
 
     def _migrate_log(msg, level="info"):
         with _MIGRATE_LOCK:
@@ -2165,10 +2176,11 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
             if progress is not None:
                 _MIGRATE_STATE["progress"] = progress
 
-    def _ensure_sshpass():
+    def _ensure_sshpass(quiet=False):
         if shutil.which("sshpass"):
             return True
-        _migrate_log("正在安装 sshpass…")
+        if not quiet:
+            _migrate_log("正在安装 sshpass…")
         try:
             subprocess.run(["apt-get", "update", "-qq"],
                            capture_output=True, timeout=120)
@@ -2176,127 +2188,343 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
                            capture_output=True, timeout=180)
             return shutil.which("sshpass") is not None
         except Exception as e:
-            _migrate_log(f"安装 sshpass 失败: {e}", "error")
+            if not quiet:
+                _migrate_log(f"安装 sshpass 失败: {e}", "error")
             return False
 
-    def _ssh_run(host, port, password, remote_cmd, timeout=120):
-        cmd = ["sshpass", "-p", password, "ssh",
-               "-o", "StrictHostKeyChecking=no",
-               "-o", "UserKnownHostsFile=/dev/null",
-               "-o", "ConnectTimeout=15",
-               "-p", str(port), f"root@{host}", remote_cmd]
+    # ---------- 迁移凭据与远程执行 ----------
+    def _mig_parse_req(data):
+        """解析并校验迁移请求，返回 (auth, 错误信息)；auth 仅驻内存。"""
+        host = (data.get("host") or "").strip()
+        if not host or not re.fullmatch(r"[A-Za-z0-9._\-]+", host):
+            return None, "请输入有效的新服务器 IP / 主机名"
+        try:
+            port = int(data.get("port") or 22)
+        except (ValueError, TypeError):
+            port = 22
+        if not (1 <= port <= 65535):
+            port = 22
+        username = (data.get("username") or "root").strip() or "root"
+        if not re.fullmatch(r"[A-Za-z0-9._\-]+", username):
+            return None, "SSH 用户名不合法"
+        auth = {"host": host, "port": port, "username": username,
+                "type": "password", "password": "", "private_key": "",
+                "passphrase": "", "key_path": None}
+        if (data.get("auth_type") or "password") == "key":
+            key = data.get("private_key") or ""
+            if "PRIVATE KEY" not in key:
+                return None, "请粘贴或上传 SSH 私钥（PEM/OpenSSH 格式）"
+            auth.update({"type": "key", "private_key": key,
+                         "passphrase": data.get("passphrase") or ""})
+        else:
+            if not data.get("password"):
+                return None, "请输入 SSH 密码"
+            auth["password"] = data["password"]
+        return auth, ""
+
+    def _mig_sudo(auth):
+        return "" if auth["username"] == "root" else "sudo -i "
+
+    def _mig_ssh_args(auth):
+        args = ["-p", str(auth["port"]),
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=15"]
+        if auth["type"] == "key":
+            args += ["-i", auth["key_path"], "-o", "IdentitiesOnly=yes",
+                     "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no"]
+        else:
+            args += ["-o", "PubkeyAuthentication=no",
+                     "-o", "NumberOfPasswordPrompts=1"]
+        return args
+
+    def _mig_run(cmd, timeout=120, env_extra=None, stdin_text=None):
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
         try:
             r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=timeout)
+                               timeout=timeout, env=env, input=stdin_text)
             return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
         except subprocess.TimeoutExpired:
-            return False, "", "SSH 命令超时"
+            return False, "", "命令执行超时"
         except Exception as e:
             return False, "", str(e)
 
-    def _scp_to(host, port, password, local_path, remote_path, timeout=600):
-        cmd = ["sshpass", "-p", password, "scp",
-               "-o", "StrictHostKeyChecking=no",
-               "-o", "UserKnownHostsFile=/dev/null",
-               "-P", str(port), local_path, f"root@{host}:{remote_path}"]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=timeout)
-            if r.returncode == 0:
-                return True, ""
-            return False, r.stderr.strip() or "SCP 传输失败"
-        except subprocess.TimeoutExpired:
-            return False, "SCP 传输超时"
-        except Exception as e:
-            return False, str(e)
+    def _mig_ssh(auth, remote_cmd, timeout=120, stdin_text=None):
+        cmd = ["ssh"] + _mig_ssh_args(auth) + \
+            [f"{auth['username']}@{auth['host']}", remote_cmd]
+        if auth["type"] == "password":
+            return _mig_run(["sshpass", "-e"] + cmd, timeout=timeout,
+                            env_extra={"SSHPASS": auth["password"]},
+                            stdin_text=stdin_text)
+        return _mig_run(cmd, timeout=timeout, stdin_text=stdin_text)
 
-    def _do_migrate(host, port, password):
+    def _mig_rsync(auth, local_src, remote_dest, extra=None, timeout=1200):
+        cmd = ["rsync", "-az"] + list(extra or [])
+        if auth["username"] != "root":
+            cmd += ["--rsync-path=sudo -i rsync"]
+        cmd += ["-e", "ssh " + " ".join(_mig_ssh_args(auth)),
+                local_src, f"{auth['username']}@{auth['host']}:{remote_dest}"]
+        if auth["type"] == "password":
+            return _mig_run(["sshpass", "-e"] + cmd, timeout=timeout,
+                            env_extra={"SSHPASS": auth["password"]})
+        return _mig_run(cmd, timeout=timeout)
+
+    def _mig_prepare_key(auth):
+        """把私钥写入 /tmp 临时文件（0600），带口令时先去除口令并校验。"""
+        if auth["type"] != "key":
+            return
+        fd, path = tempfile.mkstemp(prefix="bigcat-migrate-key-")
+        auth["key_path"] = path
+        try:
+            key = auth["private_key"]
+            if not key.endswith("\n"):
+                key += "\n"
+            with os.fdopen(fd, "w") as f:
+                f.write(key)
+            os.chmod(path, 0o600)
+            if auth["passphrase"]:
+                ok, _, _ = _mig_run(
+                    ["ssh-keygen", "-p", "-P", auth["passphrase"],
+                     "-N", "", "-f", path], timeout=30)
+                if not ok:
+                    raise RuntimeError(
+                        "密钥口令不正确，或密钥格式不受支持（需 OpenSSH/PEM 格式）")
+            ok, _, _ = _mig_run(["ssh-keygen", "-y", "-f", path], timeout=30)
+            if not ok:
+                raise RuntimeError(
+                    "密钥无效或带有口令：如密钥设有口令，请填写密钥口令后重试")
+        except Exception:
+            _mig_cleanup_key(auth)
+            raise
+
+    def _mig_cleanup_key(auth):
+        path = auth.get("key_path")
+        auth["key_path"] = None
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _mig_check_conn(auth, timeout=30):
+        """测试连接并做基础检查，返回 (ok, message, has_bigcat)。"""
+        ok, out, err = _mig_ssh(auth, "echo ok", timeout=timeout)
+        if not ok:
+            return False, f"SSH 连接失败: {err or out}", False
+        if auth["username"] != "root":
+            ok, _, _ = _mig_ssh(auth, "sudo -n true", timeout=timeout)
+            if not ok:
+                return False, ("目标用户无免密 sudo 权限：非 root 用户迁移需要"
+                               "免密 sudo（如甲骨文云 ubuntu 用户）"), False
+        ok, out, _ = _mig_ssh(
+            auth, "test -d /opt/bigcat/server && echo yes || echo no",
+            timeout=timeout)
+        return True, "连接成功", (out or "").strip() == "yes"
+
+    def _mig_table_counts(db_file):
+        counts = {}
+        conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+        try:
+            for t in ("clients", "users", "alert_rules", "settings", "records"):
+                try:
+                    counts[t] = conn.execute(
+                        f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                except Exception:
+                    counts[t] = None
+        finally:
+            conn.close()
+        return counts
+
+    def _do_migrate(auth):
+        S = _mig_sudo(auth)
+        snapshot = "/tmp/bigcat-migrate.db"
+        install_dir = os.path.dirname(os.path.dirname(os.path.abspath(db_path)))
+        data_dir = os.path.join(install_dir, "data")
         try:
             _migrate_set("准备迁移", 5)
-            _migrate_log(f"目标服务器: {host}:{port}")
-            if not _ensure_sshpass():
-                raise RuntimeError("无法安装 sshpass，请手动安装后重试")
-            _migrate_set("测试 SSH 连接", 10)
-            _migrate_log("正在连接目标服务器…")
-            ok, out, err = _ssh_run(host, port, password, "echo ok")
+            _migrate_log(f"目标服务器: {auth['username']}@{auth['host']}:{auth['port']}"
+                         f"（{'密钥' if auth['type'] == 'key' else '密码'}登录）")
+            if auth["type"] == "key":
+                _mig_prepare_key(auth)
+                _migrate_log("SSH 密钥已就绪（临时文件，迁移结束自动删除）")
+            else:
+                if not _ensure_sshpass():
+                    raise RuntimeError("无法安装 sshpass，请手动安装后重试")
+            if not shutil.which("rsync"):
+                raise RuntimeError("本机缺少 rsync，请先安装后重试")
+            _migrate_set("连接新服务器", 10)
+            ok, msg, _ = _mig_check_conn(auth)
             if not ok:
-                raise RuntimeError(f"SSH 连接失败: {err or out}")
-            _migrate_log("SSH 连接成功")
-            _migrate_set("在目标机安装 BigCat", 20)
+                raise RuntimeError(msg)
+            _migrate_log("SSH 连接成功"
+                         + ("（已确认免密 sudo）" if auth["username"] != "root" else ""))
+            _migrate_set("准备目标服务器", 20)
+            ok, out, err = _mig_ssh(
+                auth, "command -v rsync >/dev/null 2>&1 && echo have || echo missing",
+                timeout=30)
+            if ok and out.strip() == "missing":
+                _migrate_log("目标机未安装 rsync，正在安装…")
+                ok, out, err = _mig_ssh(
+                    auth, f"{S}apt-get update -qq && {S}apt-get install -y -qq rsync",
+                    timeout=600)
+                if not ok:
+                    raise RuntimeError(f"目标机安装 rsync 失败: {(err or out)[-300:]}")
             _migrate_log("正在目标机安装 BigCat（约需 1-3 分钟）…")
-            ok, out, err = _ssh_run(
-                host, port, password,
-                "curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.sh | bash -s -- server",
-                timeout=600)
+            tmp_pwd = secrets.token_hex(12)
+            install_stdin = (
+                "export BIGCAT_PORT=25774\n"
+                "export BIGCAT_ADMIN_USER=admin\n"
+                f"export BIGCAT_ADMIN_PASSWORD='{tmp_pwd}'\n"
+                "bash /tmp/bigcat-install.sh server\n"
+                "rm -f /tmp/bigcat-install.sh\n")
+            ok, out, err = _mig_ssh(
+                auth, "curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/"
+                      "bigcat/main/scripts/install.sh -o /tmp/bigcat-install.sh",
+                timeout=120)
+            if not ok:
+                raise RuntimeError(f"目标机下载安装脚本失败: {(err or out)[-300:]}")
+            ok, out, err = _mig_ssh(auth, f"{S}bash -s", timeout=900,
+                                    stdin_text=install_stdin)
             if not ok:
                 raise RuntimeError(f"目标机安装失败: {(err or out)[-500:]}")
             _migrate_log("目标机 BigCat 安装完成")
-            _migrate_set("打包本地数据", 40)
-            data_dir = os.path.dirname(os.path.abspath(db_path))
-            backup_path = "/tmp/bigcat-migrate.tar.gz"
-            _migrate_log(f"正在打包 {data_dir} …")
+            _migrate_set("快照数据库", 35)
             db_file = os.path.abspath(db_path)
-            tmp_db = "/tmp/bigcat-migrate.db"
+            if os.path.exists(snapshot):
+                os.remove(snapshot)
+            src = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+            dst = sqlite3.connect(snapshot)
             try:
-                import sqlite3
-                src = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
-                dst = sqlite3.connect(tmp_db)
                 src.backup(dst)
+            finally:
                 dst.close()
                 src.close()
-            except Exception as e:
-                raise RuntimeError(f"数据库备份失败: {e}")
-            r = subprocess.run(
-                ["tar", "czf", backup_path,
-                 "-C", data_dir, "--exclude=bigcat.db", ".",
-                 "-C", "/tmp", "--transform", "s/bigcat-migrate.db/bigcat.db/",
-                 os.path.basename(tmp_db)],
-                capture_output=True, text=True, timeout=300)
-            try:
-                os.remove(tmp_db)
-            except OSError:
-                pass
-            if r.returncode != 0:
-                raise RuntimeError(f"打包失败: {r.stderr[-300:]}")
-            size_mb = os.path.getsize(backup_path) / 1048576
-            _migrate_log(f"打包完成（{size_mb:.1f} MB）")
-            _migrate_set("传输数据到目标机", 60)
-            _migrate_log("正在传输数据包…")
-            ok, err = _scp_to(host, port, password, backup_path,
-                              "/tmp/bigcat-migrate.tar.gz")
+            local_counts = _mig_table_counts(snapshot)
+            _migrate_log(f"数据库一致性快照完成（节点 {local_counts.get('clients')} 个，"
+                         f"监控记录 {local_counts.get('records')} 条）")
+            _migrate_set("同步程序文件", 50)
+            ok, out, err = _mig_rsync(
+                auth, os.path.join(install_dir, "server") + "/",
+                "/opt/bigcat/server/",
+                extra=["--delete", "--exclude", "__pycache__"], timeout=600)
             if not ok:
-                raise RuntimeError(f"传输失败: {err}")
-            _migrate_log("传输完成")
-            try:
-                os.remove(backup_path)
-            except OSError:
-                pass
-            _migrate_set("在目标机恢复数据", 80)
-            _migrate_log("正在目标机恢复数据…")
-            ok, out, err = _ssh_run(host, port, password, (
-                "systemctl stop bigcat 2>/dev/null; "
-                "tar xzf /tmp/bigcat-migrate.tar.gz -C /opt/bigcat/data && "
-                "rm -f /tmp/bigcat-migrate.tar.gz && "
-                "systemctl start bigcat && sleep 3 && "
-                "curl -s http://127.0.0.1:25774/api/version"),
-                timeout=120)
+                raise RuntimeError(f"程序文件同步失败: {(err or out)[-300:]}")
+            _migrate_log("程序文件同步完成（与本机版本一致）")
+            _migrate_set("同步数据目录", 62)
+            ok, out, err = _mig_ssh(auth, f"{S}systemctl stop bigcat 2>/dev/null; "
+                                          f"sleep 2; {S}systemctl is-active bigcat || true",
+                                    timeout=60)
+            if out.strip().endswith("active"):
+                _mig_ssh(auth, f"{S}systemctl stop bigcat; sleep 2", timeout=60)
+            has_bak = any(fnmatch.fnmatch(f, "bigcat.db.bak.*")
+                          for f in os.listdir(data_dir))
+            ok, out, err = _mig_rsync(
+                auth, data_dir + "/", "/opt/bigcat/data/",
+                extra=["--delete", "--exclude", "bigcat.db",
+                       "--exclude", "bigcat.db-wal", "--exclude", "bigcat.db-shm",
+                       "--exclude", "bigcat.db.bak.*"], timeout=1800)
             if not ok:
-                raise RuntimeError(f"目标机恢复失败: {(err or out)[-500:]}")
+                raise RuntimeError(f"数据目录同步失败: {(err or out)[-300:]}")
+            _migrate_log("数据目录同步完成（主题、皮肤等原封不动）"
+                         + ("；已跳过大体积历史备份文件 bigcat.db.bak.*（可手动拷贝）"
+                            if has_bak else ""))
+            _migrate_set("同步数据库", 78)
+            ok, out, err = _mig_rsync(auth, snapshot, "/opt/bigcat/data/bigcat.db",
+                                      extra=["--ignore-times"], timeout=1800)
+            if not ok:
+                raise RuntimeError(f"数据库同步失败: {(err or out)[-300:]}")
+            ok, out, err = _mig_ssh(
+                auth, f"{S}rm -f /opt/bigcat/data/bigcat.db-wal "
+                      f"/opt/bigcat/data/bigcat.db-shm && echo cleaned", timeout=60)
+            if not ok:
+                raise RuntimeError(f"目标机清理 WAL 失败: {(err or out)[-300:]}")
+            _migrate_log("数据库同步完成")
+            # 启动前预检：直接读目标库文件计数（服务未启动时应与快照完全一致）；
+            # 首次安装的初始化写入可能与传输竞态，不一致时自动重传一次快照。
+            count_py = (
+                "import sqlite3, json\n"
+                "conn = sqlite3.connect('file:/opt/bigcat/data/bigcat.db?mode=ro', uri=True)\n"
+                "out = {}\n"
+                "for t in ('clients', 'users', 'alert_rules', 'settings', 'records'):\n"
+                "    try:\n"
+                "        out[t] = conn.execute('SELECT COUNT(*) FROM ' + t).fetchone()[0]\n"
+                "    except Exception:\n"
+                "        out[t] = None\n"
+                "print(json.dumps(out))\n")
+
+            def _remote_counts():
+                ok2, out2, _ = _mig_ssh(auth, f"{S}python3 -", timeout=60,
+                                        stdin_text=count_py)
+                if not ok2:
+                    return None
+                try:
+                    return json.loads(out2.strip().splitlines()[-1])
+                except Exception:
+                    return None
+
+            pre = _remote_counts()
+            if pre != local_counts:
+                _migrate_log("启动前预检行数不一致，正在重传数据库快照…", "warn")
+                ok, out, err = _mig_rsync(auth, snapshot, "/opt/bigcat/data/bigcat.db",
+                                          extra=["--ignore-times"], timeout=1800)
+                if not ok:
+                    raise RuntimeError(f"数据库重传失败: {(err or out)[-300:]}")
+                _mig_ssh(auth, f"{S}rm -f /opt/bigcat/data/bigcat.db-wal "
+                               f"/opt/bigcat/data/bigcat.db-shm", timeout=60)
+                pre = _remote_counts()
+                if pre != local_counts:
+                    raise RuntimeError(
+                        f"目标机数据库预检仍不一致（本机 {local_counts} / 目标 {pre}），"
+                        "已中止启动，请手动检查目标机")
+            _migrate_log("启动前预检通过：目标库行数与快照一致")
+            _migrate_set("启动目标服务", 88)
+            ok, out, err = _mig_ssh(
+                auth, f"{S}systemctl restart bigcat && sleep 5 && "
+                      f"{S}systemctl is-active bigcat", timeout=120)
+            if not ok or "active" not in out:
+                raise RuntimeError(f"目标机服务启动失败: {(err or out)[-500:]}")
             _migrate_log("目标机服务已启动")
             _migrate_set("验证迁移结果", 95)
-            ok, out, err = _ssh_run(host, port, password,
-                                    "curl -s http://127.0.0.1:25774/api/version",
-                                    timeout=30)
-            if not ok or "version" not in out:
-                raise RuntimeError("目标机服务验证失败，请手动检查")
-            _migrate_log(f"验证通过: {out.strip()}")
+            ok, out, err = _mig_ssh(
+                auth, "curl -s http://127.0.0.1:25774/api/version", timeout=30)
+            remote_ver = ""
+            try:
+                remote_ver = (json.loads(out) or {}).get("version", "")
+            except Exception:
+                pass
+            if not ok or remote_ver != VERSION:
+                raise RuntimeError(
+                    f"版本不一致：本机 v{VERSION}，新服务器返回 {out.strip() or err}")
+            _migrate_log(f"版本验证通过：v{remote_ver}")
+            count_py = (
+                "import sqlite3, json\n"
+                "conn = sqlite3.connect('file:/opt/bigcat/data/bigcat.db?mode=ro', uri=True)\n"
+                "out = {}\n"
+                "for t in ('clients', 'users', 'alert_rules', 'settings', 'records'):\n"
+                "    try:\n"
+                "        out[t] = conn.execute('SELECT COUNT(*) FROM ' + t).fetchone()[0]\n"
+                "    except Exception:\n"
+                "        out[t] = None\n"
+                "print(json.dumps(out))\n")
+            ok, out, err = _mig_ssh(auth, f"{S}python3 -", timeout=60,
+                                    stdin_text=count_py)
+            if not ok:
+                raise RuntimeError(f"目标机数据校验失败: {(err or out)[-300:]}")
+            remote_counts = json.loads(out.strip().splitlines()[-1])
+            diff = [f"{t}: 本机 {local_counts.get(t)} / 目标 {remote_counts.get(t)}"
+                    for t in local_counts
+                    if local_counts.get(t) != remote_counts.get(t)]
+            if diff:
+                raise RuntimeError("数据行数不一致：" + "；".join(diff))
+            _migrate_log("数据校验通过：节点、用户、告警规则、设置、监控记录行数与本机完全一致")
             with _MIGRATE_LOCK:
                 _MIGRATE_STATE["done"] = True
                 _MIGRATE_STATE["success"] = True
                 _MIGRATE_STATE["running"] = False
             _migrate_set("迁移完成", 100)
-            _migrate_log(f"迁移完成！新服务器地址 http://{host}:25774")
-            _migrate_log("注意：本机服务仍在运行，确认新服务器正常后请手动停止本机服务", "warn")
+            _migrate_log(f"✅ 迁移完成！新服务器后台：http://{auth['host']}:25774/admin")
+            _migrate_log("注意：本机服务仍在运行，确认新服务器正常后请手动停止本机服务，避免数据分叉", "warn")
         except Exception as e:
             with _MIGRATE_LOCK:
                 _MIGRATE_STATE["done"] = True
@@ -2304,53 +2532,54 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
                 _MIGRATE_STATE["error"] = str(e)
                 _MIGRATE_STATE["running"] = False
             _migrate_log(f"迁移失败: {e}", "error")
+        finally:
+            _mig_cleanup_key(auth)
+            with _MIGRATE_LOCK:
+                _MIGRATE_AUTH.clear()
+            try:
+                os.remove(snapshot)
+            except OSError:
+                pass
 
     @_require_perm("migrate")
     @app.route("/api/admin/migrate/test", methods=["POST"])
     def api_migrate_test():
         data = request.get_json(force=True, silent=True) or {}
-        host = (data.get("host") or "").strip()
-        port = data.get("port") or 22
-        password = data.get("password") or ""
-        if not host:
-            return jsonify({"ok": False, "message": "请输入服务器 IP"}), 400
-        if not password:
-            return jsonify({"ok": False, "message": "请输入 SSH 密码"}), 400
+        auth, errmsg = _mig_parse_req(data)
+        if errmsg:
+            return jsonify({"ok": False, "message": errmsg}), 400
         try:
-            port = int(port)
-        except (ValueError, TypeError):
-            port = 22
-        if not _ensure_sshpass():
-            return jsonify({"ok": False, "message": "sshpass 安装失败"}), 200
-        ok, out, err = _ssh_run(host, port, password, "echo ok", timeout=30)
-        if not ok:
-            return jsonify({"ok": False,
-                            "message": f"SSH 连接失败: {err or out}"}), 200
-        return jsonify({"ok": True, "message": "连接成功"})
+            if auth["type"] == "key":
+                try:
+                    _mig_prepare_key(auth)
+                except Exception as e:
+                    return jsonify({"ok": False, "message": str(e)}), 200
+            elif not _ensure_sshpass(quiet=True):
+                return jsonify({"ok": False, "message": "sshpass 安装失败"}), 200
+            ok, msg, has_bigcat = _mig_check_conn(auth)
+            return jsonify({"ok": ok, "message": msg, "has_bigcat": has_bigcat})
+        finally:
+            _mig_cleanup_key(auth)
+            auth["password"] = ""
+            auth["private_key"] = ""
 
     @_require_perm("migrate")
     @app.route("/api/admin/migrate/start", methods=["POST"])
     def api_migrate_start():
         data = request.get_json(force=True, silent=True) or {}
-        host = (data.get("host") or "").strip()
-        port = data.get("port") or 22
-        password = data.get("password") or ""
-        if not host:
-            return jsonify({"ok": False, "message": "请输入服务器 IP"}), 400
-        if not password:
-            return jsonify({"ok": False, "message": "请输入 SSH 密码"}), 400
-        try:
-            port = int(port)
-        except (ValueError, TypeError):
-            port = 22
+        auth, errmsg = _mig_parse_req(data)
+        if errmsg:
+            return jsonify({"ok": False, "message": errmsg}), 400
         with _MIGRATE_LOCK:
             if _MIGRATE_STATE["running"]:
                 return jsonify({"ok": False, "message": "迁移任务进行中"}), 400
             _MIGRATE_STATE.update({"running": True, "step": "启动中",
                                    "progress": 0, "log": [], "done": False,
                                    "success": False, "error": "",
-                                   "target": f"{host}:{port}"})
-        t = threading.Thread(target=_do_migrate, args=(host, port, password),
+                                   "target": f"{auth['username']}@{auth['host']}:{auth['port']}"})
+            _MIGRATE_AUTH.clear()
+            _MIGRATE_AUTH.update(auth)
+        t = threading.Thread(target=_do_migrate, args=(_MIGRATE_AUTH,),
                              daemon=True)
         t.start()
         return jsonify({"ok": True, "message": "迁移已启动"})
@@ -2360,6 +2589,19 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     def api_migrate_status():
         with _MIGRATE_LOCK:
             return jsonify({"ok": True, **_MIGRATE_STATE})
+
+    @_require_perm("migrate")
+    @app.route("/api/admin/migrate/reset", methods=["POST"])
+    def api_migrate_reset():
+        with _MIGRATE_LOCK:
+            if _MIGRATE_STATE["running"]:
+                return jsonify({"ok": False, "message": "迁移进行中，不能重置"}), 400
+            _mig_cleanup_key(_MIGRATE_AUTH)
+            _MIGRATE_AUTH.clear()
+            _MIGRATE_STATE.update({"running": False, "step": "", "progress": 0,
+                                   "log": [], "done": False, "success": False,
+                                   "error": "", "target": ""})
+        return jsonify({"ok": True, "message": "已重置，可再次迁移"})
 
     @app.route("/api/admin/setup", methods=["POST"])
     def admin_setup():
