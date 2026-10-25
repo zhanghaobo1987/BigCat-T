@@ -1005,7 +1005,8 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         if path.startswith("/.well-known/acme-challenge/"):
             name = path.rsplit("/", 1)[-1]
             if re.fullmatch(r"[A-Za-z0-9_-]+", name or ""):
-                fp = os.path.join(_DOMAIN_WEBROOT, name)
+                fp = os.path.join(_DOMAIN_WEBROOT, ".well-known",
+                                  "acme-challenge", name)
                 if os.path.isfile(fp):
                     with open(fp, "rb") as fh:
                         body = fh.read()
@@ -1212,7 +1213,8 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     def acme_challenge(name):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", name or ""):
             return Response("not found", status=404)
-        fp = os.path.join(_DOMAIN_WEBROOT, name)
+        fp = os.path.join(_DOMAIN_WEBROOT, ".well-known",
+                          "acme-challenge", name)
         if not os.path.isfile(fp):
             return Response("not found", status=404)
         with open(fp, "rb") as fh:
