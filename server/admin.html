@@ -706,7 +706,7 @@
     <section id="page-migrate" class="page hidden">
       <div class="card">
         <h2>🚚 服务器迁移</h2>
-        <p class="muted">输入新服务器的 IP、SSH 端口和用户名（默认 root），选择密码或密钥登录，一键把本机 BigCat 全部内容（程序文件、数据库、主题、配置）原封不动迁移过去。目标服务器会自动安装 BigCat 并配置 systemd 开机自启。密码/密钥仅用于本次迁移，不会被保存。使用非 root 用户时，特权操作会自动通过 sudo -i 以 root 身份执行，该用户需具备免密 sudo 权限（如甲骨文云的 ubuntu）。迁移过程中本机可正常使用。</p>
+        <p class="muted">输入新服务器的 IP、SSH 端口和用户名（默认 root），选择密码或密钥登录，一键把本机 BigCat 全部内容（程序文件、数据库、主题、配置）原封不动迁移过去。目标服务器会自动安装 BigCat 并配置 systemd 开机自启。迁移完成后会自动给所有被监控主机下发切换指令（旧版探针先自动升级再切换），主机逐个在新服务器上线，无需逐台修改。密码/密钥仅用于本次迁移，不会被保存。使用非 root 用户时，特权操作会自动通过 sudo -i 以 root 身份执行，该用户需具备免密 sudo 权限（如甲骨文云的 ubuntu）。迁移过程中本机可正常使用。</p>
         <div class="form-grid" style="max-width:560px">
           <label>新服务器 IP <span class="req">*</span>
             <input id="mig-host" placeholder="例如 1.2.3.4">
@@ -750,6 +750,13 @@
           <div id="mig-log" class="log-box"></div>
           <div class="btn-row hidden" id="mig-reset-row" style="margin-top:12px">
             <button class="ghost" id="mig-reset">再次迁移</button>
+          </div>
+          <div id="mig-agents" class="hidden" style="margin-top:14px">
+            <p class="muted" id="mig-agents-status" style="margin:0 0 8px"></p>
+            <div class="btn-row">
+              <button class="ghost" id="mig-agents-go">补发主机切换指令</button>
+              <button class="ghost" id="mig-agents-stop">停止下发切换指令</button>
+            </div>
           </div>
         </div>
       </div>
@@ -2884,7 +2891,20 @@ function renderMigStatus(s) {
   $('mig-start').disabled = busy;
   $('mig-test').disabled = busy;
   $('mig-reset-row').classList.toggle('hidden', !(s.done && !s.running));
-  if (s.done && !s.running && migPollTimer) {
+  const ag = $('mig-agents');
+  if ((s.done && s.success) || s.redirect) {
+    ag.classList.remove('hidden');
+    if (s.redirect) {
+      $('mig-agents-status').textContent =
+        `主机切换指令下发中 → ${s.redirect}；仍向本机上报 ${s.agents_here}/${s.agents_total} 台` +
+        (s.agents_here ? `（${(s.agents_here_names || []).join('、')}）` : '，已全部切换到新服务器');
+    } else {
+      $('mig-agents-status').textContent = '主机切换指令未下发（迁移时自动下发；如有主机漏切可补发）';
+    }
+  } else {
+    ag.classList.add('hidden');
+  }
+  if (s.done && !s.running && !s.redirect && migPollTimer) {
     clearInterval(migPollTimer); migPollTimer = null;
   }
 }
@@ -2950,6 +2970,29 @@ $('mig-reset').onclick = async () => {
     $('mig-log').innerHTML = '';
   } catch (e) {
     toast('重置失败：' + e.message);
+  }
+};
+$('mig-agents-go').onclick = async () => {
+  const host = $('mig-host').value.trim();
+  if (!host) return toast('请先在上方填新服务器 IP');
+  if (!confirm(`向全部被监控主机补发切换指令？它们将切换到 http://${host}:25774`)) return;
+  try {
+    const {data} = await api('/api/admin/migrate/agents-online', 'POST', { host });
+    if (!data.ok) return toast(data.message || '下发失败');
+    toast(`已下发切换指令 → ${data.url}（在线 ${data.online}/${data.nodes} 台）`, 'ok');
+    if (!migPollTimer) migPollTimer = setInterval(pollMigStatus, 2000);
+    pollMigStatus();
+  } catch (e) {
+    toast('下发失败：' + e.message);
+  }
+};
+$('mig-agents-stop').onclick = async () => {
+  try {
+    const {data} = await api('/api/admin/migrate/agents-stop', 'POST', {});
+    toast(data.message || '已停止下发', 'ok');
+    pollMigStatus();
+  } catch (e) {
+    toast('操作失败：' + e.message);
   }
 };
 LOADERS.migrate = loadMigrate;

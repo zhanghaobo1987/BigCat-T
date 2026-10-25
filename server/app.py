@@ -1944,7 +1944,11 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
             totals["arch"] = cpu["arch"]
         if totals:
             store.update_client(client["uuid"], totals)
-        return jsonify({"ok": True})
+        _resp = {"ok": True}
+        _mr = _master_redirect()
+        if _mr:
+            _resp["master"] = _mr
+        return jsonify(_resp)
 
     @app.route("/api/agent/tasks", methods=["GET"])
     def agent_tasks():
@@ -2191,6 +2195,59 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
             if not quiet:
                 _migrate_log(f"安装 sshpass 失败: {e}", "error")
             return False
+
+    # ---------- 被监控主机切换（迁移后自动上线） ----------
+    _AGENT_UPGRADE_CMD = (
+        "curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/agent/agent.py "
+        "-o /tmp/bigcat-agent-new.py && install -m 644 /tmp/bigcat-agent-new.py /opt/bigcat/agent.py "
+        "&& (nohup sh -c 'sleep 3; systemctl restart bigcat-agent' >/dev/null 2>&1 &) "
+        "&& echo agent-upgraded")
+
+    def _master_redirect():
+        """当前生效的主控切换指令 URL（随 agent 上报响应下发）；未设置/过期返回 ''。"""
+        try:
+            obj = json.loads(store.get_setting("agent_master_redirect", "") or "{}")
+        except Exception:
+            obj = {}
+        url = (obj.get("url") or "").strip()
+        if url and float(obj.get("until") or 0) > time.time():
+            return url
+        return ""
+
+    def _issue_agent_switch(new_url):
+        """下发主控切换：设置切换指令（新版 agent 下次上报即切换并持久化）+
+        给全部节点排队 agent 升级任务（旧版 agent 升级重启后同样执行切换指令）。
+        返回 (新排队升级任务数, 节点总数, 当前在线节点 uuid 集合)。"""
+        store.set_setting("agent_master_redirect",
+                          json.dumps({"url": new_url,
+                                      "until": time.time() + 7 * 86400}))
+        now = datetime.now(timezone.utc)
+        clients = store.list_clients()
+        n = 0
+        for c in clients:
+            try:
+                if not store.has_pending_exec(c["uuid"], _AGENT_UPGRADE_CMD):
+                    store.add_exec_task(c["uuid"], _AGENT_UPGRADE_CMD)
+                    n += 1
+            except Exception:
+                pass
+        online = {c["uuid"] for c in clients if _node_online(c, now)}
+        return n, len(clients), online
+
+    def _agents_still_here(uuids):
+        """给定集合中近 25 秒内仍在向本机上报的节点（尚未切换走）。
+        不用离线阈值（默认 180s 太粗，切换完成会被误判为未切换）。"""
+        if not uuids:
+            return []
+        now = datetime.now(timezone.utc)
+        out = []
+        for c in store.list_clients():
+            if c["uuid"] not in uuids:
+                continue
+            t = _parse_time(c.get("last_report_at"))
+            if t and (now - t).total_seconds() < 25:
+                out.append(c)
+        return out
 
     # ---------- 迁移凭据与远程执行 ----------
     def _mig_parse_req(data):
@@ -2518,13 +2575,72 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
             if diff:
                 raise RuntimeError("数据行数不一致：" + "；".join(diff))
             _migrate_log("数据校验通过：节点、用户、告警规则、设置、监控记录行数与本机完全一致")
+            # ---- 被监控主机自动切换上线：下发切换指令 + 旧 agent 升级任务，
+            # 等待在线节点逐个离开本机（即已切到新服务器），迁移完直接可用 ----
+            _migrate_set("被监控主机切换上线", 97)
+            new_url = f"http://{auth['host']}:25774"
+            issue_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            n_tasks, n_nodes, online_uuids = _issue_agent_switch(new_url)
+            _migrate_log(f"已向全部 {n_nodes} 台被监控主机下发切换指令（目标 {new_url}），"
+                         f"其中 {n_tasks} 台排队自动升级 agent；"
+                         f"当前在线 {len(online_uuids)} 台，等待切换…")
+            deadline = time.time() + 150
+            while time.time() < deadline:
+                still = _agents_still_here(online_uuids)
+                if not still:
+                    break
+                time.sleep(5)
+            still = _agents_still_here(online_uuids)
+            switched = len(online_uuids) - len(still)
+            if online_uuids and not still:
+                _migrate_log(f"全部 {len(online_uuids)} 台在线被监控主机已离开本机（正在确认到达新服务器…）")
+            elif still:
+                names = "、".join((c.get("name") or c["uuid"][:8]) for c in still)
+                _migrate_log(f"主机切换：{switched}/{len(online_uuids)} 台已切换；"
+                             f"仍在本机的：{names}（可能离线或升级较慢，"
+                             f"切换指令 7 天内有效，其下次连上本机时自动切换；"
+                             f"请勿立即停止本机服务）", "warn")
+            if n_nodes > len(online_uuids):
+                _migrate_log(f"另有 {n_nodes - len(online_uuids)} 台离线主机："
+                             f"其下次连上本机时将自动切换到新服务器", "warn")
+            # 到达确认：离开本机 ≠ 到达新机（目标端口未放行时主机到不了），
+            # 经 SSH 读目标库核对切换后已在新服务器上报的主机数
+            arrived = None
+            if online_uuids:
+                arr_py = (
+                    "import sqlite3\n"
+                    "conn = sqlite3.connect('/opt/bigcat/data/bigcat.db')\n"
+                    f"n = conn.execute(\"SELECT COUNT(*) FROM clients "
+                    f"WHERE last_report_at > '{issue_iso}'\").fetchone()[0]\n"
+                    "print(n)\n")
+                for _try in range(3):
+                    ok_a, out_a, _err_a = _mig_ssh(auth, f"{S}python3 -", timeout=60,
+                                                   stdin_text=arr_py)
+                    if ok_a:
+                        try:
+                            arrived = int(out_a.strip().splitlines()[-1])
+                        except (ValueError, IndexError):
+                            arrived = None
+                    if arrived is not None and arrived >= len(online_uuids):
+                        break
+                    time.sleep(5)
+                if arrived is not None:
+                    _migrate_log(f"新服务器到达确认：{arrived} 台主机已在新服务器上报")
+                    if arrived < len(online_uuids):
+                        _migrate_log(f"⚠️ {len(online_uuids) - arrived} 台主机已离开本机但尚未到达新服务器，"
+                                     f"请检查新服务器 25774 端口是否对主机网络放行（云防火墙/安全组）", "warn")
             with _MIGRATE_LOCK:
                 _MIGRATE_STATE["done"] = True
                 _MIGRATE_STATE["success"] = True
                 _MIGRATE_STATE["running"] = False
             _migrate_set("迁移完成", 100)
             _migrate_log(f"✅ 迁移完成！新服务器后台：http://{auth['host']}:25774/admin")
-            _migrate_log("注意：本机服务仍在运行，确认新服务器正常后请手动停止本机服务，避免数据分叉", "warn")
+            if still:
+                _migrate_log("注意：本机服务仍在运行；仍有主机未切换，请勿停止本机，待其切换后再停", "warn")
+            elif online_uuids and arrived is not None and arrived < len(online_uuids):
+                _migrate_log("注意：本机服务仍在运行；部分主机尚未到达新服务器，排查端口放行后再停止本机", "warn")
+            else:
+                _migrate_log("注意：本机服务仍在运行，被监控主机已全部切换，可停止本机服务（systemctl stop bigcat）避免数据分叉", "warn")
         except Exception as e:
             with _MIGRATE_LOCK:
                 _MIGRATE_STATE["done"] = True
@@ -2588,7 +2704,37 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     @app.route("/api/admin/migrate/status")
     def api_migrate_status():
         with _MIGRATE_LOCK:
-            return jsonify({"ok": True, **_MIGRATE_STATE})
+            st = dict(_MIGRATE_STATE)
+        url = _master_redirect()
+        st["redirect"] = url or None
+        clients = store.list_clients()
+        here = _agents_still_here({c["uuid"] for c in clients})
+        st["agents_total"] = len(clients)
+        st["agents_here"] = len(here)
+        st["agents_here_names"] = [(c.get("name") or c["uuid"][:8]) for c in here]
+        return jsonify({"ok": True, **st})
+
+    @_require_perm("migrate")
+    @app.route("/api/admin/migrate/agents-online", methods=["POST"])
+    def api_migrate_agents_online():
+        data = request.get_json(force=True, silent=True) or {}
+        host = (data.get("host") or "").strip()
+        if not host:
+            with _MIGRATE_LOCK:
+                tgt = _MIGRATE_STATE.get("target", "")
+            host = tgt.split("@")[-1].split(":")[0] if tgt else ""
+        if not host or not re.fullmatch(r"[A-Za-z0-9._\-]+", host):
+            return jsonify({"ok": False, "message": "缺少新服务器地址"}), 400
+        url = f"http://{host}:25774"
+        n_tasks, n_nodes, online = _issue_agent_switch(url)
+        return jsonify({"ok": True, "url": url, "upgrade_tasks": n_tasks,
+                        "nodes": n_nodes, "online": len(online)})
+
+    @_require_perm("migrate")
+    @app.route("/api/admin/migrate/agents-stop", methods=["POST"])
+    def api_migrate_agents_stop():
+        store.set_setting("agent_master_redirect", "")
+        return jsonify({"ok": True, "message": "已停止下发切换指令"})
 
     @_require_perm("migrate")
     @app.route("/api/admin/migrate/reset", methods=["POST"])

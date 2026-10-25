@@ -1084,6 +1084,14 @@ class Storage:
                 "SELECT * FROM exec_tasks WHERE id = ?", (cur.lastrowid,)).fetchone()
         return dict(row) if row else {}
 
+    def has_pending_exec(self, client_uuid: str, command: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*) AS n FROM exec_tasks
+                   WHERE client_uuid = ? AND command = ? AND status = 'pending'""",
+                (client_uuid, command[:2000])).fetchone()
+        return bool(row and row["n"])
+
     def claim_exec_tasks(self, client_uuid: str, limit: int = 5):
         """Agent picks up pending tasks; marked running to avoid double execution."""
         with self._lock:

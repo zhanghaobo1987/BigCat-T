@@ -49,6 +49,32 @@ def _ssl_context(insecure: bool):
     return _insecure_ctx
 
 
+# ------------------------------------------------------------ 主控切换（迁移）
+# 主控迁移后在上报响应中下发 {"master": "http://新地址:25774"}，agent 收到即
+# 切换上报目标并持久化到 agent.py 同目录 master.json，重启后继续用新主控，
+# 免去逐台修改 agent 配置。指令只来自当前主控的鉴权响应。
+_MASTER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master.json")
+
+
+def _load_master_override() -> str:
+    try:
+        with open(_MASTER_FILE, "r", encoding="utf-8") as f:
+            url = (json.load(f) or {}).get("server", "")
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url.rstrip("/")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _save_master_override(url: str):
+    try:
+        with open(_MASTER_FILE, "w", encoding="utf-8") as f:
+            json.dump({"server": url}, f)
+    except Exception as e:  # noqa: BLE001
+        print(f"[agent] save master override failed: {e}")
+
+
 def _post(url: str, payload: dict, token: str = "", timeout: int = 10,
           insecure: bool = False) -> dict:
     data = json.dumps(payload).encode()
@@ -98,7 +124,7 @@ def collect_basic_info(args=None):
         "mem_total": vm.total,
         "swap_total": sm.total,
         "disk_total": du.total,
-        "version": "BigCat-agent/1.0.0",
+        "version": "BigCat-agent/1.1.0",
         "name": socket.gethostname(),
     }
     if args is not None:
@@ -450,6 +476,10 @@ def main():
     args = ap.parse_args()
 
     server = args.server.rstrip("/")
+    _override = _load_master_override()
+    if _override and _override != server:
+        print(f"[agent] master override active: {_override} (configured: {server})")
+        server = _override
     print(f"[agent] reporting to {server} every {args.interval}s")
 
     # send static info once
@@ -483,8 +513,22 @@ def main():
             ping_results = prober.drain()
             if ping_results:
                 report["ping_results"] = ping_results
-            _post(f"{server}/api/agent/report", {"report": report}, token=args.token,
-                  insecure=args.insecure)
+            resp = _post(f"{server}/api/agent/report", {"report": report}, token=args.token,
+                         insecure=args.insecure)
+            # 主控切换指令（服务器迁移）：换目标、持久化、向新主控补发静态信息
+            _new_master = resp.get("master") if isinstance(resp, dict) else None
+            if isinstance(_new_master, str):
+                _new_master = _new_master.rstrip("/")
+                if _new_master.startswith(("http://", "https://")) and _new_master != server:
+                    print(f"[agent] master redirect: {server} -> {_new_master}")
+                    _save_master_override(_new_master)
+                    server = _new_master
+                    try:
+                        _info = collect_basic_info(args)
+                        _post(f"{server}/api/agent/basicinfo", {"info": _info},
+                              token=args.token, insecure=args.insecure)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[agent] basicinfo to new master failed: {e}")
         except Exception as e:  # noqa: BLE001
             print(f"[agent] report failed: {e}")
         # 每轮顺带轮询远程执行任务（低频操作，失败不影响上报；可被 --disable-remote-exec 关闭）
