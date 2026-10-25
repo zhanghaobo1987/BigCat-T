@@ -852,6 +852,17 @@
         <option value="1099511627776">T</option>
       </select></div>
     </div>
+    <label>已使用流量</label>
+    <div class="form2" style="grid-template-columns:1fr 1fr 1fr">
+      <div><input id="edit-used" type="number" min="0" step="0.01" placeholder="当前已使用"></div>
+      <div><select id="edit-used-unit">
+        <option value="1073741824">G</option>
+        <option value="1048576">M</option>
+        <option value="1099511627776">T</option>
+      </select></div>
+      <div><button id="btn-cal-traffic" type="button">流量校准</button></div>
+    </div>
+    <p class="muted" id="edit-used-now" style="margin:2px 0 0"></p>
     <label>流量重置日（每月几号，空或 0 为按到期日）</label><input id="edit-reset-day" type="number" min="0" max="31" step="1" placeholder="如 1">
     <label>离线宽限（秒，0 为使用全局设置）</label><input id="edit-grace" type="number" min="0" step="10">
     <div class="form2">
@@ -1804,6 +1815,8 @@ window.openEdit = uuid => {
   $('edit-expired').value = normDateInput(c.expired_at);
   $('edit-renew').checked = !!c.auto_renewal;
   setLimit(c.traffic_limit || 0, c.traffic_limit_type || 'sum');
+  $('edit-used').value = ''; $('edit-used-now').textContent = '';
+  loadUsedTraffic(c.uuid);
   $('edit-reset-day').value = c.traffic_reset_day || '';
   $('edit-grace').value = c.offline_grace || '';
   $('edit-hidden').checked = !!c.hidden;
@@ -1833,6 +1846,39 @@ $('btn-edit-save').onclick = async () => {
   if (status === 401) return needLogin();
   if (data && data.ok) { closeModals(); loadNodes(); }
   else $('edit-err').textContent = '保存失败';
+};
+function setUsedInput(bytes) {
+  const units = [['1099511627776', 1099511627776], ['1073741824', 1073741824], ['1048576', 1048576]];
+  for (const [uv, m] of units) {
+    if (bytes >= m) { $('edit-used-unit').value = uv; $('edit-used').value = Math.round(bytes / m * 100) / 100; return; }
+  }
+  $('edit-used-unit').value = '1048576';
+  $('edit-used').value = bytes ? Math.round(bytes / 1048576 * 100) / 100 : 0;
+}
+async function loadUsedTraffic(uuid) {
+  $('edit-used-now').textContent = '正在读取当前已用流量…';
+  const {status, data} = await api('/api/admin/client/' + uuid + '/traffic');
+  if (status === 401) return needLogin();
+  if (data && data.ok) {
+    setUsedInput(data.used);
+    $('edit-used-now').textContent = '当前周期已用 ' + fmtSize(data.used) + '（出站 ' + fmtSize(data.up) + ' / 入站 ' + fmtSize(data.down) + ')' +
+      (data.cycle_start ? '，本周期始于 ' + data.cycle_start + '，到重置日自动清零' : '') +
+      '。如与服务商后台不一致，改成正确数值后点「流量校准」。';
+  } else { $('edit-used-now').textContent = '读取当前已用流量失败'; }
+}
+$('btn-cal-traffic').onclick = async () => {
+  const uuid = $('edit-uuid').value;
+  const v = parseFloat($('edit-used').value);
+  if (isNaN(v) || v < 0) { $('edit-err').textContent = '请先填写正确的已使用流量'; return; }
+  const bytes = Math.round(v * parseFloat($('edit-used-unit').value));
+  if (!confirm('把该主机已使用流量校准为 ' + fmtSize(bytes) + '？\n前台卡片的已用 / 剩余流量会随之更新。')) return;
+  const {status, data} = await api('/api/admin/client/' + uuid + '/traffic-calibrate', 'POST', {used_bytes: bytes});
+  if (status === 401) return needLogin();
+  if (data && data.ok) {
+    setUsedInput(data.used);
+    $('edit-err').textContent = '';
+    $('edit-used-now').textContent = '已校准：当前已用 ' + fmtSize(data.used) + '（出站 ' + fmtSize(data.up) + ' / 入站 ' + fmtSize(data.down) + '），前台已同步。';
+  } else { $('edit-err').textContent = (data && data.message) || '校准失败'; }
 };
 $('btn-add-node').onclick = async () => {
   const name = $('new-node-name').value.trim();

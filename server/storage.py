@@ -241,6 +241,9 @@ class Storage:
                 "report_types": "TEXT DEFAULT 'daily,weekly,monthly'",
                 "traffic_limit_type": "TEXT DEFAULT ''",
                 "traffic_reset_day": "INTEGER DEFAULT 0",
+                "traffic_base_up": "INTEGER DEFAULT 0",
+                "traffic_base_down": "INTEGER DEFAULT 0",
+                "traffic_base_cycle": "TEXT DEFAULT ''",
             }.items():
                 if col not in cols:
                     self._conn.execute(f"ALTER TABLE clients ADD COLUMN {col} {ddl}")
@@ -343,6 +346,7 @@ class Storage:
             "weight", "price", "billing_cycle", "auto_renewal", "currency",
             "expired_at", "group", "tags", "hidden", "traffic_limit",
             "traffic_limit_type", "traffic_reset_day",
+            "traffic_base_up", "traffic_base_down", "traffic_base_cycle",
             "offline_grace", "notify_offline", "report_enabled", "report_types",
         }
         sets, vals = [], []
@@ -458,6 +462,19 @@ class Storage:
                 (client_uuid,),
             ).fetchone()
         return dict(row) if row else None
+
+    def adjust_latest_record_totals(self, client_uuid: str, d_up: int, d_down: int):
+        """流量校准即时生效：给最新一条记录的累计流量叠加偏移（与入库偏移一致，
+        避免下一条上报前前台仍显示旧值）。"""
+        with self._lock:
+            self._conn.execute(
+                """UPDATE records
+                   SET net_total_up = MAX(0, net_total_up + ?),
+                       net_total_down = MAX(0, net_total_down + ?)
+                   WHERE id = (SELECT id FROM records WHERE client = ?
+                               ORDER BY time DESC LIMIT 1)""",
+                (int(d_up), int(d_down), client_uuid))
+            self._conn.commit()
 
     def prune_records(self, keep_hours: int = 24):
         """Drop records older than keep_hours to bound DB size."""

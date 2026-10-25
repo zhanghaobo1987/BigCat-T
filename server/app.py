@@ -561,6 +561,31 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
                 return None
         return None
 
+    _TRAFFIC_TZ = timezone(timedelta(hours=8))
+
+    def _traffic_cycle_start(c, now=None):
+        """节点当前流量周期的起始日期（date）；未配置周期时返回 None。
+
+        周期日 = traffic_reset_day（1-31），未设置时按到期日期的“号”。
+        按东八区计算，与用户在前台看到的“X 天后重置”口径一致；
+        周期日超过当月天数时钳到当月最后一天。"""
+        import calendar as _cal
+        day = c.get("traffic_reset_day") or 0
+        if not (1 <= day <= 31):
+            exp = _parse_expiry_date(c.get("expired_at"))
+            day = exp.day if exp else 0
+        if not (1 <= day <= 31):
+            return None
+        now = now or datetime.now(_TRAFFIC_TZ)
+        y, m = now.year, now.month
+        if now.day >= min(day, _cal.monthrange(y, m)[1]):
+            return date(y, m, min(day, _cal.monthrange(y, m)[1]))
+        if m == 1:
+            y, m = y - 1, 12
+        else:
+            m -= 1
+        return date(y, m, min(day, _cal.monthrange(y, m)[1]))
+
     def _iso(dt: datetime) -> str:
         # 入库时间只到秒：查询边界也截断到秒，避免 "…16Z" > "…16.123456Z" 的字符串比较陷阱
         return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -1903,6 +1928,43 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
             "connections_udp": conn.get("udp", 0),
             "uptime": rep.get("uptime", 0),
         }
+        # 流量周期基线：累计流量入库时减去周期基线，得到“本周期已用”。
+        # 配置了重置日的节点跨入新周期时基线自动重置（用量清零重新累计）；
+        # 管理员的流量校准通过调整基线实现（见 /traffic-calibrate）。
+        _raw_up = rec["net_total_up"]
+        _raw_down = rec["net_total_down"]
+        _b_up = client.get("traffic_base_up") or 0
+        _b_down = client.get("traffic_base_down") or 0
+        _cycle = _traffic_cycle_start(client)
+        if _cycle is not None:
+            _cid = _cycle.isoformat()
+            _saved_cycle = client.get("traffic_base_cycle") or ""
+            if _saved_cycle != _cid:
+                if _saved_cycle == "":
+                    # 功能首次启用：只登记周期，不改动当前显示，下个周期起全程生效
+                    store.update_client(client["uuid"],
+                                        {"traffic_base_cycle": _cid})
+                else:
+                    # 跨入新周期：基线重置为当前累计值，本周期用量从 0 起算
+                    _b_up, _b_down = _raw_up, _raw_down
+                    store.update_client(client["uuid"], {
+                        "traffic_base_up": _b_up,
+                        "traffic_base_down": _b_down,
+                        "traffic_base_cycle": _cid})
+            else:
+                # 累计计数回退（机器重启/换网卡）：基线跟随回退，该方向重新累计
+                _fix = {}
+                if _raw_up < _b_up:
+                    _b_up = _raw_up
+                    _fix["traffic_base_up"] = _b_up
+                if _raw_down < _b_down:
+                    _b_down = _raw_down
+                    _fix["traffic_base_down"] = _b_down
+                if _fix:
+                    store.update_client(client["uuid"], _fix)
+        if _b_up or _b_down:
+            rec["net_total_up"] = max(0, _raw_up - _b_up)
+            rec["net_total_down"] = max(0, _raw_down - _b_down)
         store.insert_record(client["uuid"], rec)
         store.touch_client(client["uuid"])
         # v1.9.4：节点侧分布式延迟探测结果（agent 自行探测后随上报回传）
@@ -2857,6 +2919,71 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     @_require_perm("servers")
     def admin_client_delete(client_uuid):
         return jsonify({"ok": store.delete_client(client_uuid)})
+
+    def _client_traffic_now(c):
+        """节点当前已用流量（与前台卡片同口径：最新记录入库后的累计总量，
+        已按周期基线换算为本周期值；按 traffic_limit_type 取总和/出站/入站）。
+        返回 (up, down, used)。"""
+        r = store.latest_record(c["uuid"]) or {}
+        up = r.get("net_total_up", 0) or 0
+        down = r.get("net_total_down", 0) or 0
+        mode = c.get("traffic_limit_type") or "sum"
+        used = up if mode == "up" else down if mode == "down" else up + down
+        return up, down, used
+
+    @app.route("/api/admin/client/<client_uuid>/traffic")
+    @_require_perm("servers")
+    def admin_client_traffic(client_uuid):
+        c = store.get_client(client_uuid)
+        if not c:
+            return jsonify({"ok": False, "message": "节点不存在"}), 404
+        up, down, used = _client_traffic_now(c)
+        cyc = _traffic_cycle_start(c)
+        return jsonify({"ok": True, "up": up, "down": down, "used": used,
+                        "mode": c.get("traffic_limit_type") or "sum",
+                        "cycle_start": cyc.isoformat() if cyc else None})
+
+    @app.route("/api/admin/client/<client_uuid>/traffic-calibrate", methods=["POST"])
+    @_require_perm("servers")
+    def admin_client_traffic_calibrate(client_uuid):
+        """流量校准：把本周期已用流量校准到管理员给定的值。
+        通过下调周期基线实现（显示用量 = 累计总量 − 基线），差值按当前
+        出/入比例分摊；基线同时调整最新一条记录使前台立即生效。
+        校准只作用于当前周期：跨入新周期时基线自动重置，用量重新累计。"""
+        c = store.get_client(client_uuid)
+        if not c:
+            return jsonify({"ok": False, "message": "节点不存在"}), 404
+        data = request.get_json(force=True, silent=True) or {}
+        try:
+            target = int(data.get("used_bytes"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "已使用流量数值不合法"}), 400
+        if target < 0:
+            return jsonify({"ok": False, "message": "已使用流量不能为负"}), 400
+        up, down, used = _client_traffic_now(c)
+        delta = target - used
+        mode = c.get("traffic_limit_type") or "sum"
+        if mode == "up":
+            d_up, d_down = delta, 0
+        elif mode == "down":
+            d_up, d_down = 0, delta
+        elif up + down > 0:
+            d_up = round(delta * up / (up + down))
+            d_down = delta - d_up
+        else:
+            d_up, d_down = delta, 0
+        fields = {
+            "traffic_base_up": (c.get("traffic_base_up") or 0) - d_up,
+            "traffic_base_down": (c.get("traffic_base_down") or 0) - d_down,
+        }
+        cyc = _traffic_cycle_start(c)
+        if cyc is not None:
+            fields["traffic_base_cycle"] = cyc.isoformat()
+        store.update_client(client_uuid, fields)
+        store.adjust_latest_record_totals(client_uuid, d_up, d_down)
+        c2 = store.get_client(client_uuid)
+        up2, down2, used2 = _client_traffic_now(c2)
+        return jsonify({"ok": True, "up": up2, "down": down2, "used": used2})
 
     @app.route("/api/admin/settings", methods=["GET", "POST"])
     @_require_perm("settings")
