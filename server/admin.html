@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BigCat 后台管理</title>
+<title>BigCat T 后台管理</title>
 <style>
   :root { --bg:#0b0f14; --card:#131a23; --border:#232d3a; --text:#e6edf3;
           --muted:#8b98a9; --accent:#2f81f7; --danger:#f85149; --ok:#3fb950; --warn:#d29922; --code-bg:#0d131b; }
@@ -14,6 +14,7 @@
   [data-skin-mode="light"] aside nav button.active { background:#d5e4fb; }
   [data-skin-mode="light"] input, [data-skin-mode="light"] select, [data-skin-mode="light"] textarea { background:#f7fafc; }
   .brand { text-decoration:none; color:inherit; display:block; }
+  .brand-icon { width:32px; height:32px; border-radius:8px; vertical-align:-8px; margin-right:8px; }
   .brand h1 { cursor:pointer; }
   .brand:hover h1 { color:var(--accent); }
   .theme-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:16px; }
@@ -207,7 +208,7 @@
 
 <!-- 登录 / 初始化 -->
 <div id="view-auth" class="card center hidden" style="margin:8vh auto;max-width:400px">
-  <h1>🐱 BigCat 后台</h1>
+  <h1><img src="/icon.png" alt="" style="width:34px;height:34px;border-radius:9px;vertical-align:-9px;margin-right:8px">BigCat T 后台</h1>
   <div id="auth-setup">
     <p class="muted">首次使用，请创建管理员账号。</p>
     <label>管理员用户名</label>
@@ -271,7 +272,7 @@
 <!-- 主界面 -->
 <div id="view-main" class="layout hidden">
   <aside>
-    <a class="brand" href="/" target="_blank" rel="noopener" title="在新标签页打开前台监控页"><h1>🐱 BigCat</h1></a>
+    <a class="brand" href="/" target="_blank" rel="noopener" title="在新标签页打开前台监控页"><h1><img src="/icon.png" alt="" class="brand-icon">BigCat T</h1></a>
     <p class="ver" id="side-ver"></p>
     <nav id="nav"></nav>
     <div class="nav-foot-col">
@@ -352,7 +353,7 @@
           <h2 style="margin:0">延迟监测任务</h2>
           <button class="small" id="btn-add-ping">＋ 新增任务</button>
         </div>
-        <p class="muted">由 BigCat 主控每间隔定时探测（TCP / HTTP / ICMP），结果保留 72 小时。</p>
+        <p class="muted">由 BigCat T 主控每间隔定时探测（TCP / HTTP / ICMP），结果保留 72 小时。</p>
         <table>
           <thead><tr><th>任务</th><th>目标</th><th>类型</th><th>间隔</th><th>绑定节点</th><th>最近延迟</th><th>可用率</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="ping-body"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
@@ -632,6 +633,26 @@
       </div>
     </section>
 
+    <section id="page-domain" class="page hidden">
+      <div class="card">
+        <h2>域名设置</h2>
+        <p class="muted">为面板绑定域名并自动申请 Let's Encrypt 证书，完成后即可用域名（HTTPS）访问前台与后台。原 25774 端口保持不变，探针上报不受影响。</p>
+        <label>域名</label>
+        <input id="dom-name" type="text" placeholder="如 panel.example.com（不要带 http:// 或端口）">
+        <p class="muted" style="margin:6px 0 0">部署前请确认：① 已将该域名解析（A 记录）到当前服务器公网 IP；② 云厂商安全组 / 防火墙已放行 80、443 端口。证书通过 80 端口验证签发，约需 1 分钟。</p>
+        <div class="ok" id="dom-ok"></div><div class="err" id="dom-err"></div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button id="btn-dom-deploy">部署域名</button>
+          <button id="btn-dom-remove" class="danger">移除域名</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>当前状态</h2>
+        <div id="dom-status"><p class="muted">加载中…</p></div>
+        <pre id="dom-log" style="white-space:pre-wrap;word-break:break-all;font-size:12px;color:var(--muted);max-height:220px;overflow:auto"></pre>
+      </div>
+    </section>
+
     <section id="page-themes" class="page hidden">
       <div class="card">
         <h2>主题管理</h2>
@@ -706,7 +727,7 @@
     <section id="page-migrate" class="page hidden">
       <div class="card">
         <h2>🚚 服务器迁移</h2>
-        <p class="muted">输入新服务器的 IP、SSH 端口和用户名（默认 root），选择密码或密钥登录，一键把本机 BigCat 全部内容（程序文件、数据库、主题、配置）原封不动迁移过去。目标服务器会自动安装 BigCat 并配置 systemd 开机自启。迁移完成后会自动给所有被监控主机下发切换指令（旧版探针先自动升级再切换），主机逐个在新服务器上线，无需逐台修改。密码/密钥仅用于本次迁移，不会被保存。使用非 root 用户时，特权操作会自动通过 sudo -i 以 root 身份执行，该用户需具备免密 sudo 权限（如甲骨文云的 ubuntu）。迁移过程中本机可正常使用。</p>
+        <p class="muted">输入新服务器的 IP、SSH 端口和用户名（默认 root），选择密码或密钥登录，一键把本机 BigCat T 全部内容（程序文件、数据库、主题、配置）原封不动迁移过去。目标服务器会自动安装 BigCat T 并配置 systemd 开机自启。迁移完成后会自动给所有被监控主机下发切换指令（旧版探针先自动升级再切换），主机逐个在新服务器上线，无需逐台修改。密码/密钥仅用于本次迁移，不会被保存。使用非 root 用户时，特权操作会自动通过 sudo -i 以 root 身份执行，该用户需具备免密 sudo 权限（如甲骨文云的 ubuntu）。迁移过程中本机可正常使用。</p>
         <div class="form-grid" style="max-width:560px">
           <label>新服务器 IP <span class="req">*</span>
             <input id="mig-host" placeholder="例如 1.2.3.4">
@@ -1124,7 +1145,7 @@ const PAGES = [
   ['notify', '🔔', '通知'], ['events', '📝', '事件日志'],
   ['database', '💾', '数据库'],
   ['sessions', '👥', '会话管理'], ['account', '👤', '账户'],
-  ['settings', '⚙️', '设置'], ['skin', '💅', '外观皮肤'],
+  ['settings', '⚙️', '设置'], ['domain', '🌐', '域名设置'], ['skin', '💅', '外观皮肤'],
   ['logs', '📜', '系统日志'], ['migrate', '🚚', '迁移'], ['about', 'ℹ️', '关于'],
 ];
 let curPage = 'dashboard';
@@ -1240,7 +1261,7 @@ function go(p) {
   const v = await api('/api/version');
   if (v.data && v.data.version) {
     $('side-ver').textContent = 'v' + v.data.version;
-    $('ver-foot').textContent = 'BigCat v' + v.data.version;
+    $('ver-foot').textContent = 'BigCat T v' + v.data.version;
   }
 })();
 
@@ -1703,8 +1724,8 @@ function refreshDeployCmd() {
   let proxy = $('deploy-proxy').value.trim();
   if (proxy && !/\/$/.test(proxy)) proxy += '/';
   const origin = location.origin, token = deployCtx.token;
-  const repo = 'https://github.com/zhanghaobo1987/bigcat';
-  const rawRoot = 'https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main';
+  const repo = 'https://github.com/zhanghaobo1987/BigCat-T';
+  const rawRoot = 'https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main';
   const rawBase = rawRoot + '/scripts/';
   const o = deployExtraOpts();
   let cmd = '';
@@ -1886,7 +1907,7 @@ $('btn-add-node').onclick = async () => {
   const {status, data} = await api('/api/admin/client/add', 'POST', {name});
   if (status === 401) return needLogin();
   if (data && data.uuid) {
-    const cmd = 'curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.sh | sudo bash -s -- agent ' +
+    const cmd = 'curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.sh | sudo bash -s -- agent ' +
       location.origin + ' ' + data.token;
     box.innerHTML = '<div class="ok">节点已创建，请在被控机上执行一键安装：</div>' +
       '<code class="cmd">' + esc(cmd) + '</code>' +
@@ -2655,6 +2676,65 @@ async function loadSettings() {
   $('set-offline-th').value = data.offline_threshold || 180;
 }
 LOADERS.settings = loadSettings;
+let domPollTimer = null;
+function renderDomain(d) {
+  const box = $('dom-status');
+  const job = d.job || {};
+  if (d.domain) { if (document.activeElement !== $('dom-name')) $('dom-name').value = d.domain; }
+  let html = '';
+  if (d.domain) {
+    html += '<p>当前域名：<b>' + esc(d.domain) + '</b></p>';
+    html += '<p>访问地址：' + (d.https_listening
+      ? '<a href="' + esc(d.https_url) + '" target="_blank" rel="noopener">' + esc(d.https_url) + '</a>'
+      : esc(d.https_url) + '（HTTPS 尚未就绪）') + '</p>';
+    html += '<p class="muted">证书到期：' + (d.cert_expiry || '—') + '（自动续期）；80 端口：' +
+      (d.http_listening ? '监听中' : '未监听') + '；443 端口：' + (d.https_listening ? '监听中' : '未监听') + '</p>';
+  } else {
+    html = '<p class="muted">尚未设置域名。</p>';
+  }
+  if (job.state) {
+    const label = {idle: '空闲', running: '部署中', active: '已启用', error: '失败'}[job.state] || job.state;
+    html += '<p>状态：<b>' + label + '</b>' + (job.step ? '（' + esc(job.step) + '）' : '') + '</p>';
+    if (job.message) html += '<p>' + esc(job.message) + '</p>';
+    if (job.updated) html += '<p class="muted">更新于 ' + esc(job.updated) + '</p>';
+  }
+  box.innerHTML = html;
+  $('dom-log').textContent = job.log || '';
+  return job.state;
+}
+async function loadDomain() {
+  const {status, data} = await api('/api/admin/domain');
+  if (status === 401) return needLogin();
+  if (data && data.ok) {
+    const st = renderDomain(data);
+    if (st === 'running' && !domPollTimer) {
+      domPollTimer = setInterval(async () => {
+        const r = await api('/api/admin/domain');
+        if (r.data && r.data.ok) {
+          if (renderDomain(r.data) !== 'running') { clearInterval(domPollTimer); domPollTimer = null; }
+        }
+      }, 2000);
+    }
+  }
+}
+LOADERS.domain = loadDomain;
+$('btn-dom-deploy').onclick = async () => {
+  const domain = $('dom-name').value.trim().toLowerCase();
+  $('dom-err').textContent = ''; $('dom-ok').textContent = '';
+  if (!domain) { $('dom-err').textContent = '请先填写域名'; return; }
+  if (!confirm('将为 ' + domain + ' 申请证书并启用 HTTPS 访问？\n请确认该域名已解析到当前服务器，且 80/443 端口已放行。')) return;
+  const {status, data} = await api('/api/admin/domain/deploy', 'POST', {domain});
+  if (status === 401) return needLogin();
+  if (data && data.ok) { $('dom-ok').textContent = '部署已开始，进度见下方状态…'; loadDomain(); }
+  else $('dom-err').textContent = (data && data.message) || '启动部署失败';
+};
+$('btn-dom-remove').onclick = async () => {
+  if (!confirm('移除域名并关闭 80/443 监听？证书文件会保留，重新部署可快速恢复。')) return;
+  const {status, data} = await api('/api/admin/domain/remove', 'POST', {});
+  if (status === 401) return needLogin();
+  if (data && data.ok) { toast('域名已移除'); loadDomain(); }
+};
+
 $('btn-save-settings').onclick = async () => {
   $('settings-ok').textContent = ''; $('settings-err').textContent = '';
   const {status, data} = await api('/api/admin/settings', 'POST', {
@@ -2873,7 +2953,7 @@ async function loadAbout() {
   const up = data.uptime_sec;
   const upStr = Math.floor(up/86400) + ' 天 ' + Math.floor(up%86400/3600) + ' 小时 ' + Math.floor(up%3600/60) + ' 分钟';
   $('about-body').innerHTML = [
-    ['BigCat 版本', 'v' + data.bigcat], ['Python', data.python], ['Flask', data.flask],
+    ['BigCat T 版本', 'v' + data.bigcat], ['Python', data.python], ['Flask', data.flask],
     ['系统', data.platform], ['数据库', data.db_path + '（' + fmtSize(data.db_size) + '）'],
     ['监控记录数', data.records], ['启动时间', data.started_at], ['运行时长', upStr],
   ].map(([k, v]) => `<div class="kv"><span>${k}</span><span>${esc(String(v))}</span></div>`).join('');
@@ -2974,7 +3054,7 @@ $('mig-test').onclick = async () => {
   try {
     const {data} = await api('/api/admin/migrate/test', 'POST', v);
     if (data.ok) {
-      toast('连接成功' + (data.has_bigcat ? '（目标机已安装 BigCat，将覆盖其数据）' : ''));
+      toast('连接成功' + (data.has_bigcat ? '（目标机已安装 BigCat T，将覆盖其数据）' : ''));
     } else {
       toast('连接失败：' + data.message);
     }
@@ -2989,7 +3069,7 @@ $('mig-start').onclick = async () => {
   const bad = migValidate(v);
   if (bad) return toast(bad);
   const who = `${v.username}@${v.host}:${v.port}（${v.auth_type === 'key' ? '密钥登录' : '密码登录'}）`;
-  if (!confirm(`确定把本机 BigCat 全部内容迁移到 ${who} 吗？\n\n目标机上的 BigCat 数据将被覆盖！整个过程可能需要几分钟，期间本机可正常使用。`)) return;
+  if (!confirm(`确定把本机 BigCat T 全部内容迁移到 ${who} 吗？\n\n目标机上的 BigCat T 数据将被覆盖！整个过程可能需要几分钟，期间本机可正常使用。`)) return;
   if (!confirm('再次确认：迁移后请将域名/探针指向新服务器，本机服务仍需手动停止。开始迁移？')) return;
   try {
     const {data} = await api('/api/admin/migrate/start', 'POST', v);

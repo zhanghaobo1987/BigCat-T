@@ -7,7 +7,7 @@
   首次安装会交互式询问端口 / 管理员用户名 / 密码等，
   请以管理员身份打开 PowerShell 后粘贴：
 
-    irm https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.ps1 | iex
+    irm https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.ps1 | iex
     # 按提示选择 server 或 agent，并输入端口 / 用户名 / 密码等
 
   重复运行即升级：检测到已安装后自动复用原有配置（端口/账号/密码/主控地址/token），
@@ -15,7 +15,7 @@
 
   或先下载再传参（适合自动化）：
 
-    Invoke-WebRequest -Uri https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.ps1 -OutFile $env:TEMP\install.ps1
+    Invoke-WebRequest -Uri https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.ps1 -OutFile $env:TEMP\install.ps1
     powershell -ExecutionPolicy Bypass -File $env:TEMP\install.ps1 -Mode server -Port 8080 -AdminUser admin -AdminPassword "xxx"
     powershell -ExecutionPolicy Bypass -File $env:TEMP\install.ps1 -Mode agent -ServerUrl http://主控IP:25774 -Token <token>
 
@@ -67,7 +67,7 @@ if (-not $InstallDir) { $InstallDir = "C:\Program Files\bigcat" }
 if (-not $ServiceName -and $env:BIGCAT_SERVICE_NAME) { $ServiceName = $env:BIGCAT_SERVICE_NAME }
 if (-not $ServiceName) { $ServiceName = "bigcat-agent" }
 if (-not $RepoUrl -and $env:BIGCAT_REPO_URL) { $RepoUrl = $env:BIGCAT_REPO_URL }
-if (-not $RepoUrl) { $RepoUrl = "https://github.com/zhanghaobo1987/bigcat" }
+if (-not $RepoUrl) { $RepoUrl = "https://github.com/zhanghaobo1987/BigCat-T" }
 if ($TrafficResetDay -le 0 -and $env:BIGCAT_TRAFFIC_RESET_DAY) { $TrafficResetDay = [int]$env:BIGCAT_TRAFFIC_RESET_DAY }
 if (-not $Gpu -and $env:BIGCAT_GPU -match '^(1|true|yes|on)$') { $Gpu = $true }
 if (-not $DisableRemoteExec -and $env:BIGCAT_DISABLE_REMOTE_EXEC -match '^(1|true|yes|on)$') { $DisableRemoteExec = $true }
@@ -80,8 +80,8 @@ $ZipUrl = $RepoUrl.TrimEnd('/') + "/archive/refs/heads/main.zip"
 $VenvPythonw = Join-Path $InstallDir "venv\Scripts\pythonw.exe"
 $VenvPython  = Join-Path $InstallDir "venv\Scripts\python.exe"
 
-function Log([string]$msg) { Write-Host "[BigCat] $msg" }
-function Die([string]$msg) { Write-Host "[BigCat] 错误: $msg" -ForegroundColor Red; exit 1 }
+function Log([string]$msg) { Write-Host "[BigCat T] $msg" }
+function Die([string]$msg) { Write-Host "[BigCat T] 错误: $msg" -ForegroundColor Red; exit 1 }
 
 function Read-Secret([string]$prompt, [switch]$Required) {
   # 交互式读取密码（带确认）；Required 时不允许为空
@@ -171,7 +171,7 @@ function Install-Server {
     $upgrade = $true
   }
   if ($upgrade) {
-    Log "检测到已安装 BigCat，进入升级模式：保留原有配置（端口=$Port、管理员账号与数据不动），仅更新程序并重启"
+    Log "检测到已安装 BigCat T，进入升级模式：保留原有配置（端口=$Port、管理员账号与数据不动），仅更新程序并重启"
   } else {
     # ---- 交互式收集配置（参数优先）----
     if (-not $PSBoundParameters.ContainsKey("Port")) {
@@ -305,7 +305,7 @@ if (-not $Mode) {
   } else {
     Write-Host @"
 用法（请以管理员身份运行 PowerShell）:
-  一键安装（交互式）: irm https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.ps1 | iex
+  一键安装（交互式）: irm https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.ps1 | iex
   非交互式:
     powershell -ExecutionPolicy Bypass -File install.ps1 -Mode server [-Port 端口] [-AdminUser 用户名] [-AdminPassword 密码]
     powershell -ExecutionPolicy Bypass -File install.ps1 -Mode agent -ServerUrl http://主控IP:25774 -Token <token>

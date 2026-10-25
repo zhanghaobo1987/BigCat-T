@@ -13,8 +13,8 @@ PURGE="no"
 
 INSTALL_DIR="/opt/bigcat"
 
-log() { echo "[BigCat] $*"; }
-die() { echo "[BigCat] 错误: $*" >&2; exit 1; }
+log() { echo "[BigCat T] $*"; }
+die() { echo "[BigCat T] 错误: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行此脚本（加 sudo）"
 

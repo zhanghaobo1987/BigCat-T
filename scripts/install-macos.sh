@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# BigCat 一键安装脚本（macOS）
+# BigCat T 一键安装脚本（macOS）
 #
 # 一键粘贴安装（首次安装会交互式询问端口 / 管理员用户名 / 密码等）:
-#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install-macos.sh | sudo bash -s -- server
+#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install-macos.sh | sudo bash -s -- server
 #
 # 重复运行即升级：检测到已安装后自动复用原有配置（端口/账号/密码/主控地址/token），
 # 直接更新程序并重启，不再重复提问。如需改端口可加 --port 参数；如需重置管理员密码可加 --admin-password 参数。
 #
 # 被控端（agent）:
-#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install-macos.sh | sudo bash -s -- agent
+#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install-macos.sh | sudo bash -s -- agent
 #   # 安装过程中会询问主控地址和 token
 #
 # 非交互式（自动化）可用参数或环境变量预设全部答案:
@@ -18,7 +18,7 @@
 # 也支持 git clone 后本地运行: sudo bash scripts/install-macos.sh server
 set -euo pipefail
 
-REPO_URL="${BIGCAT_REPO_URL:-https://github.com/zhanghaobo1987/bigcat}"
+REPO_URL="${BIGCAT_REPO_URL:-https://github.com/zhanghaobo1987/BigCat-T}"
 INSTALL_DIR="${BIGCAT_INSTALL_DIR:-/usr/local/bigcat}"
 VENV="$INSTALL_DIR/venv"
 DEFAULT_PORT=25774
@@ -66,8 +66,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-log() { echo "[BigCat] $*" >&2; }  # 输出到 stderr，避免污染 $(...) 命令替换捕获的路径
-die() { echo "[BigCat] 错误: $*" >&2; exit 1; }
+log() { echo "[BigCat T] $*" >&2; }  # 输出到 stderr，避免污染 $(...) 命令替换捕获的路径
+die() { echo "[BigCat T] 错误: $*" >&2; exit 1; }
 
 [ "$(uname)" = "Darwin" ] || die "此脚本仅适用于 macOS"
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行此脚本（加 sudo），以便注册系统级 launchd 服务"
@@ -209,7 +209,7 @@ install_server() {
 
   if [ "$UPGRADE" = "yes" ]; then
     [ -n "$PORT" ] || PORT="$DEFAULT_PORT"
-    log "检测到已安装 BigCat，进入升级模式：保留原有配置（端口=$PORT、管理员账号与数据不动），仅更新程序并重启"
+    log "检测到已安装 BigCat T，进入升级模式：保留原有配置（端口=$PORT、管理员账号与数据不动），仅更新程序并重启"
   else
     # ---- 交互式收集配置（参数/环境变量优先）----
     [ -n "$PORT" ]         || PORT="$(ask "服务端监听端口" "$DEFAULT_PORT")"
@@ -330,8 +330,8 @@ case "$MODE" in
   *)
     echo "用法:" >&2
     echo "  一键安装（交互式）:" >&2
-    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install-macos.sh | sudo bash -s -- server" >&2
-    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install-macos.sh | sudo bash -s -- agent" >&2
+    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install-macos.sh | sudo bash -s -- server" >&2
+    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install-macos.sh | sudo bash -s -- agent" >&2
     echo "  非交互式:" >&2
     echo "    ... | sudo bash -s -- server --port 8080 --admin-user admin --admin-password \"xxx\"" >&2
     echo "    ... | sudo bash -s -- agent http://主控IP:25774 <token>" >&2

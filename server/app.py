@@ -45,6 +45,7 @@ import threading
 import time
 import ipaddress
 import urllib.request
+import requests
 from datetime import date, datetime, timedelta, timezone
 from importlib.metadata import version as _pkg_version
 
@@ -497,9 +498,16 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     def manifest():
         return send_from_directory(_active_theme_dist(), "manifest.json")
 
+    @app.route("/icon.png")
+    def app_icon():
+        return send_from_directory(app.config["static_dir"], "icon.png")
+
     @app.route("/favicon.ico")
     def favicon():
-        # theme references /favicon.ico; fall back to a logo svg if missing
+        # 优先用 BigCat T 图标（server/static/icon.png），主题自带 favicon 兜底
+        _icon_fp = os.path.join(app.config["static_dir"], "icon.png")
+        if os.path.isfile(_icon_fp):
+            return send_from_directory(app.config["static_dir"], "icon.png")
         try:
             return send_from_directory(_active_theme_dist(), "favicon.ico")
         except Exception:
@@ -900,6 +908,10 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
             _daily_tick()
         except Exception:
             pass
+        try:
+            _domain_tick()
+        except Exception:
+            pass
 
     def _monitor_loop():
         next_run = {}
@@ -915,6 +927,288 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     app.config["do_ping"] = _do_ping
     app.config["notify"] = _notify
     # ============ v3 core end ============
+
+    # ==================== 域名 / HTTPS（BigCat T） ====================
+    # 后台「域名」页：填域名 → acme.sh（webroot/HTTP-01）签发 Let's Encrypt
+    # 证书 → 本进程额外监听 80（验证 + 跳转 HTTPS）与 443（TLS 服务同一
+    # Flask 应用）；25774 明文端口保持不变（探针上报不受影响）。证书由
+    # 监控线程每日跑 acme.sh --cron 续期，续期后自动重载 443 监听。
+    _DOMAIN_DIR = os.path.join(os.path.dirname(os.path.abspath(db_path)), "domain")
+    _DOMAIN_WEBROOT = os.path.join(_DOMAIN_DIR, "webroot")
+    _DOMAIN_CERT_DIR = os.path.join(_DOMAIN_DIR, "cert")
+    _DOMAIN_ACME_HOME = os.path.join(_DOMAIN_DIR, "acme-home")
+    _DOMAIN_TOOLS = os.path.join(_DOMAIN_DIR, "tools")
+    _DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+    _domain_lock = threading.Lock()
+    _domain_servers = {"http": None, "https": None, "cert_sig": ""}
+    _domain_cron_running = {"v": False}
+    for _d in (_DOMAIN_WEBROOT, _DOMAIN_CERT_DIR, _DOMAIN_ACME_HOME, _DOMAIN_TOOLS):
+        os.makedirs(_d, exist_ok=True)
+
+    def _domain_name():
+        return (store.get_setting("domain_name", "") or "").strip().lower()
+
+    def _domain_job_get():
+        try:
+            return json.loads(store.get_setting("domain_job", "") or "{}")
+        except Exception:
+            return {}
+
+    def _domain_job_set(**kw):
+        job = _domain_job_get()
+        job.update(kw)
+        job["updated"] = _iso(datetime.now(timezone.utc))
+        store.set_setting("domain_job", json.dumps(job, ensure_ascii=False))
+        return job
+
+    def _domain_cert_files():
+        return (os.path.join(_DOMAIN_CERT_DIR, "fullchain.cer"),
+                os.path.join(_DOMAIN_CERT_DIR, "cert.key"))
+
+    def _domain_cert_sig():
+        fc, _ = _domain_cert_files()
+        try:
+            st = os.stat(fc)
+            return f"{st.st_mtime:.0f}:{st.st_size}"
+        except OSError:
+            return ""
+
+    def _domain_cert_expiry():
+        fc, _ = _domain_cert_files()
+        if not os.path.isfile(fc):
+            return None
+        try:
+            out = subprocess.run(
+                ["openssl", "x509", "-enddate", "-noout", "-in", fc],
+                capture_output=True, text=True, timeout=10)
+            m = re.search(r"notAfter=(.+)", out.stdout or "")
+            if m:
+                dt = datetime.strptime(m.group(1).strip(), "%b %d %H:%M:%S %Y %Z")
+                return dt.replace(tzinfo=timezone.utc).date().isoformat()
+        except Exception:
+            pass
+        return None
+
+    def _domain_http_app(environ, start_response):
+        """80 端口小应用：ACME 验证文件 + 全站 301 跳 HTTPS。"""
+        path = environ.get("PATH_INFO", "/") or "/"
+        if path.startswith("/.well-known/acme-challenge/"):
+            name = path.rsplit("/", 1)[-1]
+            if re.fullmatch(r"[A-Za-z0-9_-]+", name or ""):
+                fp = os.path.join(_DOMAIN_WEBROOT, name)
+                if os.path.isfile(fp):
+                    with open(fp, "rb") as fh:
+                        body = fh.read()
+                    start_response("200 OK", [("Content-Type", "text/plain"),
+                                              ("Content-Length", str(len(body)))])
+                    return [body]
+            start_response("404 Not Found", [("Content-Type", "text/plain")])
+            return [b"not found"]
+        domain = _domain_name()
+        if domain:
+            qs = environ.get("QUERY_STRING", "")
+            loc = f"https://{domain}{path}" + (f"?{qs}" if qs else "")
+            start_response("301 Moved Permanently", [("Location", loc)])
+            return [b""]
+        start_response("404 Not Found", [("Content-Type", "text/plain")])
+        return [b"domain not configured"]
+
+    def _domain_start_server(kind):
+        from werkzeug.serving import make_server
+        with _domain_lock:
+            if _domain_servers[kind] is not None:
+                return True
+            try:
+                if kind == "http":
+                    srv = make_server("0.0.0.0", 80, _domain_http_app, threaded=True)
+                else:
+                    import ssl as _ssl
+                    fc, key = _domain_cert_files()
+                    ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+                    ctx.load_cert_chain(fc, key)
+                    srv = make_server("0.0.0.0", 443, app, threaded=True,
+                                      ssl_context=ctx)
+                    _domain_servers["cert_sig"] = _domain_cert_sig()
+                _domain_servers[kind] = srv
+            except Exception as e:  # 端口被占/无权限等：记录到 job 状态供后台显示
+                _domain_job_set(listen_error=f"{kind}: {e}")
+                return False
+            th = threading.Thread(target=srv.serve_forever, daemon=True,
+                                  name=f"domain-{kind}")
+            th.start()
+            return True
+
+    def _domain_stop_server(kind):
+        with _domain_lock:
+            srv = _domain_servers.get(kind)
+            _domain_servers[kind] = None
+        if srv is not None:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
+
+    def _domain_ensure_servers():
+        """按当前配置拉齐 80/443 监听；证书变化时重建 443。"""
+        if not _domain_name():
+            return
+        _domain_start_server("http")
+        fc, key = _domain_cert_files()
+        if os.path.isfile(fc) and os.path.isfile(key):
+            if _domain_servers["https"] is not None and \
+                    _domain_servers["cert_sig"] != _domain_cert_sig():
+                _domain_stop_server("https")
+            _domain_start_server("https")
+
+    def _domain_stop_servers():
+        _domain_stop_server("http")
+        _domain_stop_server("https")
+
+    def _acme_cmd():
+        return os.path.join(_DOMAIN_TOOLS, "acme.sh")
+
+    def _acme_run(args, timeout=300):
+        cmd = ["sh", _acme_cmd(), "--home", _DOMAIN_ACME_HOME,
+               "--config-home", _DOMAIN_ACME_HOME,
+               "--cert-home", os.path.join(_DOMAIN_ACME_HOME, "certs")] + args
+        env = dict(os.environ)
+        env["HOME"] = _DOMAIN_ACME_HOME
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, env=env)
+        tail = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
+        return p.returncode, "\n".join(tail[-15:])
+
+    def _domain_deploy_job(domain):
+        try:
+            _domain_job_set(state="running", step="准备", message="正在启动 80 端口验证服务…", log="")
+            store.set_setting("domain_name", domain)
+            _domain_ensure_servers()
+            if _domain_servers["http"] is None:
+                err = _domain_job_get().get("listen_error", "未知错误")
+                _domain_job_set(state="error", step="监听失败",
+                                message=f"80 端口监听失败（{err}）。请确认服务以 root 运行且 80 端口未被占用。")
+                return
+            _domain_job_set(step="检查解析", message="正在检查域名解析…")
+            notes = []
+            try:
+                ips = sorted({ai[4][0] for ai in
+                              socket.getaddrinfo(domain, 443, proto=socket.IPPROTO_TCP)})
+            except Exception:
+                ips = []
+            egress = ""
+            try:
+                egress = requests.get("https://api.ipify.org", timeout=6).text.strip()
+            except Exception:
+                pass
+            if ips and egress and egress not in ips:
+                notes.append(f"提醒：域名当前解析到 {', '.join(ips)}，本机公网 IP 为 {egress}，不一致时证书验证会失败")
+            elif not ips:
+                notes.append("提醒：域名暂时解析不到任何 IP，请确认解析已生效")
+            _domain_job_set(step="准备签发工具", message="正在准备证书签发工具…")
+            if not os.path.isfile(_acme_cmd()):
+                try:
+                    r = requests.get(
+                        "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh",
+                        timeout=60)
+                    r.raise_for_status()
+                    with open(_acme_cmd(), "wb") as fh:
+                        fh.write(r.content)
+                    os.chmod(_acme_cmd(), 0o755)
+                except Exception as e:
+                    _domain_job_set(state="error", step="工具下载失败",
+                                    message=f"acme.sh 下载失败：{e}")
+                    return
+            _domain_job_set(step="注册账户", message="正在注册 Let's Encrypt 账户…")
+            _acme_run(["--register-account", "-m", f"admin@{domain}",
+                       "--server", "letsencrypt"], timeout=120)
+            _domain_job_set(step="签发证书",
+                            message="正在向 Let's Encrypt 申请证书（需域名已解析到本机且 80 端口可达）…")
+            rc, tail = _acme_run(["--issue", "-d", domain, "-w", _DOMAIN_WEBROOT,
+                                  "--keylength", "ec-256", "--server", "letsencrypt"],
+                                 timeout=420)
+            fc, key = _domain_cert_files()
+            if rc != 0:
+                _domain_job_set(state="error", step="签发失败",
+                                message="证书签发失败，请确认域名解析已指向本机、云厂商安全组已放行 80/443 端口后重试。",
+                                log=tail)
+                return
+            _domain_job_set(step="安装证书", message="证书已签发，正在安装并启用 HTTPS…")
+            rc, tail = _acme_run(
+                ["--install-cert", "-d", domain, "--ecc",
+                 "--key-file", key, "--fullchain-file", fc,
+                 "--reloadcmd", f"touch {os.path.join(_DOMAIN_CERT_DIR, '.reload')}"],
+                timeout=120)
+            if rc != 0:
+                _domain_job_set(state="error", step="安装失败",
+                                message="证书安装失败。", log=tail)
+                return
+            _domain_ensure_servers()
+            ok = False
+            try:
+                rr = requests.get("https://127.0.0.1:443/api/version",
+                                  verify=False, timeout=8)
+                ok = rr.status_code == 200
+            except Exception:
+                pass
+            msg = f"部署完成：现在可以用 https://{domain} 访问面板（25774 端口照常可用）。"
+            if notes:
+                msg += "（" + "；".join(notes) + "）"
+            if not ok:
+                msg += " 注意：本机自检 443 未通过，可能是云厂商安全组未放行 443，请放行后重试部署。"
+            _domain_job_set(state="active", step="完成", message=msg, log=tail)
+        except subprocess.TimeoutExpired:
+            _domain_job_set(state="error", step="超时", message="签发超时，请稍后重试。")
+        except Exception as e:  # noqa: BLE001
+            _domain_job_set(state="error", step="异常", message=f"部署异常：{e}")
+
+    def _domain_tick():
+        """监控线程调用：证书重载 + 每日续期检查。"""
+        try:
+            flag = os.path.join(_DOMAIN_CERT_DIR, ".reload")
+            if os.path.isfile(flag):
+                try:
+                    os.remove(flag)
+                except OSError:
+                    pass
+                _domain_stop_server("https")
+            _domain_ensure_servers()
+        except Exception:
+            pass
+        try:
+            if not _domain_name() or not _domain_cert_sig():
+                return
+            today = datetime.now(timezone.utc).date().isoformat()
+            if store.get_setting("domain_last_cron", "") == today:
+                return
+            if _domain_cron_running["v"]:
+                return
+            store.set_setting("domain_last_cron", today)
+            _domain_cron_running["v"] = True
+
+            def _renew():
+                try:
+                    if os.path.isfile(_acme_cmd()):
+                        _acme_run(["--cron"], timeout=900)
+                except Exception:
+                    pass
+                finally:
+                    _domain_cron_running["v"] = False
+
+            threading.Thread(target=_renew, daemon=True, name="domain-cron").start()
+        except Exception:
+            pass
+
+    @app.route("/.well-known/acme-challenge/<name>")
+    def acme_challenge(name):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name or ""):
+            return Response("not found", status=404)
+        fp = os.path.join(_DOMAIN_WEBROOT, name)
+        if not os.path.isfile(fp):
+            return Response("not found", status=404)
+        with open(fp, "rb") as fh:
+            return Response(fh.read(), content_type="text/plain")
+
+
 
     def _query_series(metric_key, entity_ids, start, end, max_points):
         """Build queryMetrics-style series from the records table.
@@ -2109,7 +2403,7 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     # 权限页键（与后台导航 PAGES 一一对应）
     PERM_PAGES = ["dashboard", "servers", "themes", "ping", "alerts", "exec",
                   "notify", "events", "database", "sessions", "account",
-                  "settings", "skin", "logs", "migrate"]
+                  "settings", "domain", "skin", "logs", "migrate"]
 
     def _create_login_session(username: str, role: str):
         sid = secrets.token_hex(16)
@@ -2260,7 +2554,7 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
 
     # ---------- 被监控主机切换（迁移后自动上线） ----------
     _AGENT_UPGRADE_CMD = (
-        "curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/agent/agent.py "
+        "curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/agent/agent.py "
         "-o /tmp/bigcat-agent-new.py && install -m 644 /tmp/bigcat-agent-new.py /opt/bigcat/agent.py "
         "&& (nohup sh -c 'sleep 3; systemctl restart bigcat-agent' >/dev/null 2>&1 &) "
         "&& echo agent-upgraded")
@@ -2984,6 +3278,42 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         c2 = store.get_client(client_uuid)
         up2, down2, used2 = _client_traffic_now(c2)
         return jsonify({"ok": True, "up": up2, "down": down2, "used": used2})
+
+    @app.route("/api/admin/domain")
+    @_require_perm("domain")
+    def admin_domain_get():
+        domain = _domain_name()
+        job = _domain_job_get()
+        return jsonify({
+            "ok": True, "domain": domain, "job": job,
+            "cert_expiry": _domain_cert_expiry(),
+            "https_url": f"https://{domain}" if domain else "",
+            "http_listening": _domain_servers["http"] is not None,
+            "https_listening": _domain_servers["https"] is not None,
+        })
+
+    @app.route("/api/admin/domain/deploy", methods=["POST"])
+    @_require_perm("domain")
+    def admin_domain_deploy():
+        data = request.get_json(force=True, silent=True) or {}
+        domain = (data.get("domain") or "").strip().lower()
+        if not _DOMAIN_RE.match(domain):
+            return jsonify({"ok": False, "message": "域名格式不合法（示例：panel.example.com，不要带 http:// 或端口）"}), 400
+        job = _domain_job_get()
+        if job.get("state") == "running":
+            return jsonify({"ok": False, "message": "已有部署任务在进行中"}), 409
+        _domain_job_set(state="running", step="排队", message="部署任务已启动…", domain=domain)
+        threading.Thread(target=_domain_deploy_job, args=(domain,),
+                         daemon=True, name="domain-deploy").start()
+        return jsonify({"ok": True})
+
+    @app.route("/api/admin/domain/remove", methods=["POST"])
+    @_require_perm("domain")
+    def admin_domain_remove():
+        _domain_stop_servers()
+        store.set_setting("domain_name", "")
+        _domain_job_set(state="idle", step="", message="域名已移除，80/443 监听已关闭（证书文件保留在服务器上）。")
+        return jsonify({"ok": True})
 
     @app.route("/api/admin/settings", methods=["GET", "POST"])
     @_require_perm("settings")
@@ -4320,6 +4650,12 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         threading.Thread(target=_monitor_loop, daemon=True, name="bigcat-monitor").start()
         print(f"[BigCat] monitor thread started (interval 30s)")
 
+    # 域名监听恢复：已配置域名时在服务启动后拉起 80/443（失败不影响主服务）
+    try:
+        _domain_ensure_servers()
+    except Exception:
+        pass
+
     return app
 
 
@@ -4348,7 +4684,7 @@ def main():
         return
     if not store.has_admin():
         print("NOTE: no admin account set. Run with --set-admin <user:pass> first.")
-    print(f"BigCat server v{VERSION} listening on http://{args.host}:{args.port}")
+    print(f"BigCat T server v{VERSION} listening on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, threaded=True)
 
 

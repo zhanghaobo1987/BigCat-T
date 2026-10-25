@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# BigCat 一键安装脚本（Debian / Ubuntu）
+# BigCat T 一键安装脚本（Debian / Ubuntu）
 #
 # 一键粘贴安装（首次安装会交互式询问端口 / 管理员用户名 / 密码等）:
-#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.sh | sudo bash -s -- server
+#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.sh | sudo bash -s -- server
 #
 # 重复运行即升级：检测到已安装后自动复用原有配置（端口/账号/密码/主控地址/token），
 # 直接更新程序并重启，不再重复提问。如需改端口可加 --port 参数；如需重置管理员密码可加 --admin-password 参数。
 #
 # 被控端（agent）:
-#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.sh | sudo bash -s -- agent
+#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.sh | sudo bash -s -- agent
 #   # 安装过程中会询问主控地址和 token
 #
 # 非交互式（自动化）可用参数或环境变量预设全部答案:
@@ -30,13 +30,13 @@
 #   --include-nics eth0,eth1    只统计这些网卡（逗号分隔，支持 * 通配）
 #   --exclude-nics 'docker*,veth*'  排除这些网卡（逗号分隔，支持 * 通配）
 #     例: ... | sudo bash -s -- agent http://主控IP:25774 <token> \
-#           --interval 5 --repo-url https://ghproxy.com/https://github.com/zhanghaobo1987/bigcat
+#           --interval 5 --repo-url https://ghproxy.com/https://github.com/zhanghaobo1987/BigCat-T
 #   curl -fsSL .../install.sh | sudo bash -s -- agent http://主控IP:25774 <token>
 #
 # 也支持 git clone 后本地运行: sudo bash scripts/install.sh server
 set -euo pipefail
 
-REPO_URL="${BIGCAT_REPO_URL:-https://github.com/zhanghaobo1987/bigcat}"
+REPO_URL="${BIGCAT_REPO_URL:-https://github.com/zhanghaobo1987/BigCat-T}"
 INSTALL_DIR="${BIGCAT_INSTALL_DIR:-/opt/bigcat}"
 VENV="$INSTALL_DIR/venv"
 DEFAULT_PORT=25774
@@ -83,8 +83,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-log() { echo "[BigCat] $*" >&2; }  # 输出到 stderr，避免污染 $(...) 命令替换捕获的路径
-die() { echo "[BigCat] 错误: $*" >&2; exit 1; }
+log() { echo "[BigCat T] $*" >&2; }  # 输出到 stderr，避免污染 $(...) 命令替换捕获的路径
+die() { echo "[BigCat T] 错误: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- 交互式提问
 # 关键：从 /dev/tty 读取，而不是 stdin，这样 curl ... | bash 管道模式下也能提问
@@ -218,7 +218,7 @@ install_server() {
 
   if [ "$UPGRADE" = "yes" ]; then
     [ -n "$PORT" ] || PORT="$DEFAULT_PORT"
-    log "检测到已安装 BigCat，进入升级模式：保留原有配置（端口=$PORT、管理员账号与数据不动），仅更新程序并重启"
+    log "检测到已安装 BigCat T，进入升级模式：保留原有配置（端口=$PORT、管理员账号与数据不动），仅更新程序并重启"
   else
     # ---- 交互式收集配置（参数/环境变量优先）----
     [ -n "$PORT" ]         || PORT="$(ask "服务端监听端口" "$DEFAULT_PORT")"
@@ -252,7 +252,7 @@ install_server() {
 
   cat >/etc/systemd/system/bigcat.service <<EOF
 [Unit]
-Description=BigCat monitoring server
+Description=BigCat T monitoring server
 After=network.target
 
 [Service]
@@ -323,7 +323,7 @@ install_agent() {
 
   cat >/etc/systemd/system/${AGENT_SERVICE}.service <<EOF
 [Unit]
-Description=BigCat monitoring agent
+Description=BigCat T monitoring agent
 After=network.target
 
 [Service]
@@ -355,8 +355,8 @@ case "$MODE" in
   *)
     echo "用法:" >&2
     echo "  一键安装（交互式）:" >&2
-    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.sh | sudo bash -s -- server" >&2
-    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install.sh | sudo bash -s -- agent" >&2
+    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.sh | sudo bash -s -- server" >&2
+    echo "    curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install.sh | sudo bash -s -- agent" >&2
     echo "  非交互式:" >&2
     echo "    ... | sudo bash -s -- server --port 8080 --admin-user admin --admin-password \"xxx\"" >&2
     echo "    ... | sudo bash -s -- agent http://主控IP:25774 <token>" >&2

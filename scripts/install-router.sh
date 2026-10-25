@@ -4,7 +4,7 @@
 #
 # 在路由器 SSH 上执行（已是 root，不用 sudo）：
 #
-#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main/scripts/install-router.sh \
+#   curl -fsSL https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main/scripts/install-router.sh \
 #     | sh -s -- http://主控IP:25774 <agent-token>
 #
 # 选项：
@@ -31,7 +31,7 @@ SCRIPT_VERSION="1.11.6"
 
 OPT_DIR="${BIGCAT_OPT_DIR:-/opt}"
 JFFS_DIR="${BIGCAT_JFFS_DIR:-/jffs/scripts}"
-RAW_BASE="${BIGCAT_REPO_RAW:-https://raw.githubusercontent.com/zhanghaobo1987/bigcat/main}"
+RAW_BASE="${BIGCAT_REPO_RAW:-https://raw.githubusercontent.com/zhanghaobo1987/BigCat-T/main}"
 SERVER_URL="${BIGCAT_SERVER_URL:-}"
 TOKEN="${BIGCAT_AGENT_TOKEN:-}"
 INTERVAL="${BIGCAT_INTERVAL:-2}"
@@ -40,8 +40,8 @@ USB_REQ=""
 USB=""
 AGENT_DIR=""
 
-log() { echo "[BigCat] $*" >&2; }
-die() { echo "[BigCat] 错误: $*" >&2; exit 1; }
+log() { echo "[BigCat T] $*" >&2; }
+die() { echo "[BigCat T] 错误: $*" >&2; exit 1; }
 # 部分精简 ash（如 Merlin 的 busybox）没有 command 内建命令，用 type 检测命令是否存在更可靠
 have() { type "$1" >/dev/null 2>&1; }
 

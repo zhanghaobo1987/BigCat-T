@@ -110,7 +110,7 @@ class Storage:
             self._conn.commit()
             # default settings
             defaults = {
-                "sitename": "BigCat Monitor",
+                "sitename": "BigCat T",
                 "description": "A lightweight VPS monitor, Komari-compatible.",
                 "theme": "LuminaPlus",
                 "admin_password": "",  # set on first run via CLI

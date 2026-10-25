@@ -6,3 +6,6 @@
 .server-card.is-offline::after{content:"主机已离线";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;pointer-events:none;white-space:nowrap;padding:8px 22px;border:2px solid var(--status-offline);border-radius:10px;color:var(--status-offline);background:color-mix(in srgb,var(--status-offline) 10%,var(--surface-a));font-size:22px;font-weight:700;letter-spacing:3px;box-shadow:0 2px 10px rgb(0 0 0/.12)}
 .compact-node-card.is-offline,.mini-node-card.is-offline{position:relative}
 .compact-node-card.is-offline::after,.mini-node-card.is-offline::after{content:"主机已离线";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;pointer-events:none;white-space:nowrap;padding:3px 10px;border:1.5px solid var(--status-offline);border-radius:6px;color:var(--status-offline);background:color-mix(in srgb,var(--status-offline) 10%,var(--surface-a));font-size:13px;font-weight:700;letter-spacing:1px}
+
+/* BigCat T：前台标题左侧品牌图标 */
+.home-brand::before{content:"";width:30px;height:30px;margin-right:9px;border-radius:8px;background:url(/icon.png) center/cover no-repeat;flex:none}

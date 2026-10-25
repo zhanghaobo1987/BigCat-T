@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "BigCat Monitor",
-  "short_name": "BigCat",
-  "description": "A BigCat server monitor.",
+  "name": "BigCat T",
+  "short_name": "BigCat T",
+  "description": "A BigCat T server monitor.",
   "lang": "zh-CN",
   "start_url": "/",
   "scope": "/",
