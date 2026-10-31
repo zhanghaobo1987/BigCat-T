@@ -438,22 +438,33 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         '.mini-node-card .bct-offline-since{margin-top:19px;font-size:11px}'
         '.compact-node-card .bct-offline-since{margin-top:22px}</style>'
         '<script id="bigcat-offline-since">(function(){"use strict";'
-        'var MAP={},busy=false;'
+        'var MAP={},NAMES={},BYNAME={},busy=false;'
+        'var SEL=".node-card.is-offline,.compact-node-card.is-offline,.mini-node-card.is-offline,article.is-offline";'
         'function p2(n){return (n<10?"0":"")+n;}'
         'function fmt(ts){var d=new Date(ts);if(isNaN(d.getTime()))return "";'
-        'return "离线时间：" + (d.getMonth()+1) + "月" + d.getDate() + "日 " + p2(d.getHours()) + ":" + p2(d.getMinutes());}'
+        'return "\u79bb\u7ebf\u65f6\u95f4\uff1a" + (d.getMonth()+1) + "\u6708" + d.getDate() + "\u65e5 " + p2(d.getHours()) + ":" + p2(d.getMinutes());}'
+        'function tsFor(card){'
+        'var u=card.querySelector("[data-uuid]");'
+        'if(u){var t=MAP[u.getAttribute("data-uuid")];if(t)return t;}'
+        'var leaves=card.querySelectorAll("*");'
+        'for(var i=0;i<leaves.length;i++){var el=leaves[i];'
+        'if(el.children.length===0){var tx=(el.textContent||"").trim();'
+        'if(tx&&BYNAME[tx])return BYNAME[tx];}}'
+        'return null;}'
         'function apply(){if(busy)return;busy=true;try{'
-        'document.querySelectorAll("article.is-offline").forEach(function(card){'
-        'var u=card.querySelector("[data-uuid]");var uuid=u?u.getAttribute("data-uuid"):null;'
-        'var ts=uuid?MAP[uuid]:null;var el=card.querySelector(".bct-offline-since");'
+        'document.querySelectorAll(SEL).forEach(function(card){'
+        'var ts=tsFor(card);var el=card.querySelector(".bct-offline-since");'
         'if(!ts){if(el)el.remove();return;}'
         'if(!el){el=document.createElement("div");el.className="bct-offline-since";card.appendChild(el);}'
         'var t=fmt(ts);if(t&&el.textContent!==t)el.textContent=t;});'
         'document.querySelectorAll(".bct-offline-since").forEach(function(el){'
-        'var c=el.closest("article");if(!c||!c.classList.contains("is-offline"))el.remove();});'
+        'var c=el.parentElement;'
+        'if(!c||!c.classList.contains("is-offline"))el.remove();});'
         '}finally{busy=false;}}'
         'function load(){fetch("/api/public/last-report").then(function(r){return r.json();})'
-        '.then(function(d){if(d&&d.nodes){MAP=d.nodes;apply();}}).catch(function(){});}'
+        '.then(function(d){if(d&&d.nodes){MAP=d.nodes;NAMES=d.names||{};BYNAME={};'
+        'Object.keys(MAP).forEach(function(k){if(NAMES[k])BYNAME[NAMES[k]]=MAP[k];});'
+        'apply();}}).catch(function(){});}'
         'new MutationObserver(function(){apply();}).observe(document.documentElement,'
         '{subtree:true,childList:true,attributes:true,attributeFilter:["class"]});'
         'load();setInterval(load,20000);setInterval(apply,30000);'
@@ -492,7 +503,9 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     def index():
         patched = _patched_index_html()
         if patched is not None:
-            return Response(patched, mimetype="text/html")
+            resp = Response(patched, mimetype="text/html")
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
         return send_from_directory(_active_theme_dist(), "index.html")
 
     @app.route("/crypto")
@@ -2040,9 +2053,11 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     @app.route("/api/public/last-report")
     def public_last_report():
         nodes = {}
+        names = {}
         for c in store.list_clients():
             nodes[c["uuid"]] = c.get("last_report_at")
-        resp = jsonify({"ok": True, "nodes": nodes})
+            names[c["uuid"]] = c.get("name")
+        resp = jsonify({"ok": True, "nodes": nodes, "names": names})
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
