@@ -426,6 +426,40 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         'load();'
         '})();</script>'
     )
+
+    # 前台离线卡片「离线时间」：serve-time 注入。主题用 .is-offline::after 显示
+    # 「主机已离线」徽章，本脚本在徽章下方补一行离线时间（= 最后一次上报时间，
+    # 数据来自 /api/public/last-report），卡片恢复在线后自动撤除。
+    _OFFLINE_SINCE_SNIPPET = (
+        '<style>.bct-offline-since{position:absolute;left:50%;top:50%;'
+        'transform:translate(-50%,0);margin-top:26px;z-index:6;pointer-events:none;'
+        'white-space:nowrap;font-size:12px;font-weight:600;letter-spacing:.5px;'
+        'color:var(--status-offline,#e5534b);opacity:.9}'
+        '.mini-node-card .bct-offline-since{margin-top:19px;font-size:11px}'
+        '.compact-node-card .bct-offline-since{margin-top:22px}</style>'
+        '<script id="bigcat-offline-since">(function(){"use strict";'
+        'var MAP={},busy=false;'
+        'function p2(n){return (n<10?"0":"")+n;}'
+        'function fmt(ts){var d=new Date(ts);if(isNaN(d.getTime()))return "";'
+        'return "离线时间：" + (d.getMonth()+1) + "月" + d.getDate() + "日 " + p2(d.getHours()) + ":" + p2(d.getMinutes());}'
+        'function apply(){if(busy)return;busy=true;try{'
+        'document.querySelectorAll("article.is-offline").forEach(function(card){'
+        'var u=card.querySelector("[data-uuid]");var uuid=u?u.getAttribute("data-uuid"):null;'
+        'var ts=uuid?MAP[uuid]:null;var el=card.querySelector(".bct-offline-since");'
+        'if(!ts){if(el)el.remove();return;}'
+        'if(!el){el=document.createElement("div");el.className="bct-offline-since";card.appendChild(el);}'
+        'var t=fmt(ts);if(t&&el.textContent!==t)el.textContent=t;});'
+        'document.querySelectorAll(".bct-offline-since").forEach(function(el){'
+        'var c=el.closest("article");if(!c||!c.classList.contains("is-offline"))el.remove();});'
+        '}finally{busy=false;}}'
+        'function load(){fetch("/api/public/last-report").then(function(r){return r.json();})'
+        '.then(function(d){if(d&&d.nodes){MAP=d.nodes;apply();}}).catch(function(){});}'
+        'new MutationObserver(function(){apply();}).observe(document.documentElement,'
+        '{subtree:true,childList:true,attributes:true,attributeFilter:["class"]});'
+        'load();setInterval(load,20000);setInterval(apply,30000);'
+        '})();</script>'
+    )
+
     _INDEX_PATCH_CACHE = {}  # (theme_short, mtime_ns) -> patched html | None
 
     def _patched_index_html():
@@ -449,6 +483,8 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
             text = text.replace("</body>", _CRYPTO_LINK_SNIPPET + "</body>", 1)
         if "</body>" in text and "bigcat-card-sort" not in text:
             text = text.replace("</body>", _CARD_SORT_SNIPPET + "</body>", 1)
+        if "</body>" in text and "bigcat-offline-since" not in text:
+            text = text.replace("</body>", _OFFLINE_SINCE_SNIPPET + "</body>", 1)
         _INDEX_PATCH_CACHE[key] = text
         return text
 
@@ -2000,6 +2036,15 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
     @app.route("/api/public")
     def api_public():
         return jsonify(rpc_get_public_settings({}))
+
+    @app.route("/api/public/last-report")
+    def public_last_report():
+        nodes = {}
+        for c in store.list_clients():
+            nodes[c["uuid"]] = c.get("last_report_at")
+        resp = jsonify({"ok": True, "nodes": nodes})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.route("/api/public/server_card_order", methods=["GET"])
     def public_server_card_order():
