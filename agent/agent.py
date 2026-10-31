@@ -21,6 +21,7 @@ import re
 import socket
 import ssl
 import subprocess
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -47,6 +48,24 @@ def _ssl_context(insecure: bool):
     if _insecure_ctx is None:
         _insecure_ctx = ssl._create_unverified_context()
     return _insecure_ctx
+
+
+def _build_opener(insecure: bool = False):
+    """为单次请求新建 opener：主控流量默认直连，不使用系统代理。
+
+    urllib 的全局 opener 会在进程首次请求时冻结当时的系统代理配置；此后
+    代理软件切换或换监听端口，老进程仍往失效端口打且永不自愈
+    （2026-10-31 macmini4 因此离线约 48 分钟，重启进程才恢复）。
+    这里用空 ProxyHandler 强制直连；确需代理时设环境变量
+    BIGCAT_PROXY=http://host:port，每次请求现读现用，不缓存。
+    """
+    proxy = os.environ.get("BIGCAT_PROXY", "").strip()
+    proxies = {"http": proxy, "https": proxy} if proxy else {}
+    handlers = [urllib.request.ProxyHandler(proxies)]
+    ctx = _ssl_context(insecure)
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
 
 
 # ------------------------------------------------------------ 主控切换（迁移）
@@ -84,8 +103,7 @@ def _post(url: str, payload: dict, token: str = "", timeout: int = 10,
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout,
-                                    context=_ssl_context(insecure)) as resp:
+        with _build_opener(insecure).open(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode() or "{}")
     except urllib.error.HTTPError as e:
         print(f"[agent] HTTP {e.code}: {e.read().decode()[:200]}")
@@ -124,7 +142,7 @@ def collect_basic_info(args=None):
         "mem_total": vm.total,
         "swap_total": sm.total,
         "disk_total": du.total,
-        "version": "BigCat-agent/1.1.0",
+        "version": "BigCat-agent/1.2.0",
         "name": socket.gethostname(),
     }
     if args is not None:
@@ -251,7 +269,7 @@ def _do_ping(task: dict):
         elif typ == "http":
             url = target if target.startswith("http") else "http://" + target
             req = urllib.request.Request(url, headers={"User-Agent": "BigCat-ping/1.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with _build_opener(False).open(req, timeout=10) as resp:
                 resp.read(1024)
         elif typ == "icmp":
             host = target.split(":")[0].split("/")[0].strip()
@@ -321,8 +339,7 @@ def _get(url: str, token: str = "", timeout: int = 10,
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout,
-                                    context=_ssl_context(insecure)) as resp:
+        with _build_opener(insecure).open(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode() or "{}")
     except urllib.error.HTTPError as e:
         print(f"[agent] HTTP {e.code}: {e.read().decode()[:200]}")
@@ -501,7 +518,9 @@ def main():
 
     prober = PingProber()
 
+    _fail_since = 0.0
     while True:
+        resp = {}
         try:
             # 分布式延迟探测：拉取任务 -> 本地探测 -> 结果随上报回传（v1.9.4）
             try:
@@ -531,6 +550,20 @@ def main():
                         print(f"[agent] basicinfo to new master failed: {e}")
         except Exception as e:  # noqa: BLE001
             print(f"[agent] report failed: {e}")
+        # 自愈：连续 5 分钟上报不成功就 exec 自重启，
+        # 让代理等一切进程级缓存状态全部重读（见 _build_opener 的注释）。
+        if resp:
+            _fail_since = 0.0
+        elif not _fail_since:
+            _fail_since = time.time()
+        elif time.time() - _fail_since >= 300:
+            print("[agent] no successful report for 5 min; restarting self to reset state",
+                  flush=True)
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as e:  # noqa: BLE001
+                print(f"[agent] self-restart failed: {e}")
+                _fail_since = time.time()
         # 每轮顺带轮询远程执行任务（低频操作，失败不影响上报；可被 --disable-remote-exec 关闭）
         if not args.disable_remote_exec:
             try:
