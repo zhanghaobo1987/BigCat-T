@@ -442,7 +442,7 @@ def create_app(db_path: str = "data/bigcat.db", static_dir: str = STATIC_DIR,
         'var SEL=".node-card.is-offline,.compact-node-card.is-offline,.mini-node-card.is-offline,article.is-offline";'
         'function p2(n){return (n<10?"0":"")+n;}'
         'function fmt(ts){var d=new Date(ts);if(isNaN(d.getTime()))return "";'
-        'return "\u79bb\u7ebf\u65f6\u95f4\uff1a" + (d.getMonth()+1) + "\u6708" + d.getDate() + "\u65e5 " + p2(d.getHours()) + ":" + p2(d.getMinutes());}'
+        'return "\u79bb\u7ebf\u65f6\u95f4\uff1a" + d.getFullYear() + "\u5e74" + (d.getMonth()+1) + "\u6708" + d.getDate() + "\u65e5 " + p2(d.getHours()) + ":" + p2(d.getMinutes());}'
         'function tsFor(card){'
         'var u=card.querySelector("[data-uuid]");'
         'if(u){var t=MAP[u.getAttribute("data-uuid")];if(t)return t;}'
